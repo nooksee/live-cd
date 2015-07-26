@@ -1,0 +1,117 @@
+' Gambas class file
+
+Public WorkDir As String = Func.Get_Str("/etc/live-cd/default", "WORK_DIR=", "/home")
+
+Public Sub Form_Open()
+  Dim HFColor, HBColor, HSColor, SplashFile As Variant
+  
+  Me.Center
+  Me.Caption = "SysLinux"
+  
+  Check.Conf_File()
+  
+  Func.Event_Msg("Checking syslinux files")
+  If Not Exist(WorkDir & "/ISO/isolinux/splash.pcx") And Not Exist(WorkDir & "/ISO/isolinux/splash.jpg") Then
+    Message.Warning("Splash file does not exists!")
+    ChangePic.Enabled = False
+  Else
+    If Exist(WorkDir & "/ISO/isolinux/splash.pcx") Then
+      SplashFile = "splash.pcx"
+    Else
+      SplashFile = "splash.jpg"
+    Endif
+    
+    SplashPic.Picture = Picture.Load(WorkDir & "/ISO/isolinux/" & SplashFile)
+  Endif
+
+  If Not Exist(WorkDir & "/ISO/isolinux/gfxboot.cfg") Then
+    Func.Event_Msg("Removing colour widgets and re-ordering the rest")
+    Message.Warning("gfxboot.cfg does not exist!")
+    ColorChooser1.Delete
+    SetColourMode.Delete
+    
+    ChangePic.X = 60
+    Quit.X = 270
+    Me.W = 490
+    Me.Center
+  Else
+    HFColor = Func.Get_Str(WorkDir & "/ISO/isolinux/gfxboot.cfg", "foreground=0x", "0x000000")
+    HBColor = Func.Get_Str(WorkDir & "/ISO/isolinux/gfxboot.cfg", "background=0x", "000000")
+    HSColor = Func.Get_Str(WorkDir & "/ISO/isolinux/gfxboot.cfg", "screen-colour=0x", "000000")
+    
+    ' [GB2:FCOL] Selected.ForeColor = Val("&H" & HFColor)
+    SelectedText.Foreground = Val("&H" & HFColor)
+    ' [GB2:BCOL] Selected.BackColor = Val("&H" & HSColor)
+    SelectedText.Background = Val("&H" & HSColor)
+    ' [GB2:FCOL] Normal.ForeColor = Val("&H" & HBColor)
+    NormalText.Foreground = Val("&H" & HBColor)
+    ' [GB2:BCOL] Panel1.BackColor = Val("&H" & HSColor)
+    Panel1.Background = Val("&H" & HSColor)
+    ColorChooser1.ToolTip = "Change the colour used for " & SetColourMode.Text
+  Endif
+  
+  If Not Exist(WorkDir & "/ISO/isolinux/splash.pcx") And Not Exist(WorkDir & "/ISO/isolinux/splash.jpg") And Not Exist(WorkDir & "/ISO/isolinux/gfxboot.cfg") Then
+    Message.Error("Nothing to do here")
+    Me.Close
+  Endif
+End
+
+Public Sub Quit_Click()
+  Me.Close
+End
+
+
+Public Sub ChangePic_Click()
+  Dim PIC, SplashFile As String
+
+  PIC = Func.Get_Str("/etc/live-cd/default", "PIC=", "")
+  
+  Dialog.Title = "Please select picture"
+  Dialog.Filter = ["*.pcx;*.png;*.bmp;*.jpeg;*.jpg", "Pictures"]
+  
+  If Exist(PIC) Then
+    Dialog.Path = PIC
+  Else
+    Dialog.Path = "/home"
+  Endif
+  
+  If Exist(WorkDir & "/ISO/isolinux/splash.pcx") Then
+      SplashFile = "splash.pcx"
+  Else
+      SplashFile = "splash.jpg"
+  Endif
+  
+  If Dialog.OpenFile() Then Return
+  Func.Replace_Str("/etc/live-cd/default", "PIC=", Dialog.Path)
+  
+  Func.Event_Msg("Replacing picture: " & WorkDir & "/ISO/isolinux/" & SplashFile)
+  Shell "convert -resize 640x480! -colors 256 '" & Dialog.Path & "' '" & WorkDir & "/ISO/isolinux/" & SplashFile & "'" Wait
+  SplashPic.Picture = Picture.Load(WorkDir & "/ISO/isolinux/" & SplashFile)
+End
+
+Public Sub ColorChooser1_Change()
+  Select Case SetColourMode.Text
+    Case "Selected"
+    Func.Event_Msg("Changing syslinux foreground colour: " & LCase(Hex(ColorChooser1.Value, 6)))
+    ' [GB2:FCOL] Selected.ForeColor = ColorChooser1.Value
+    SelectedText.Foreground = ColorChooser1.Value
+    Func.Replace_Str_AsIs(WorkDir & "/ISO/isolinux/gfxboot.cfg", "foreground=0x", LCase(Hex(ColorChooser1.Value, 6)))
+  Case "Normal"
+    Func.Event_Msg("Changing syslinux background colour: " & LCase(Hex(ColorChooser1.Value, 6)))
+    ' [GB2:FCOL] Normal.ForeColor = ColorChooser1.Value
+    NormalText.Foreground = ColorChooser1.Value
+    Func.Replace_Str_AsIs(WorkDir & "/ISO/isolinux/gfxboot.cfg", "background=0x", LCase(Hex(ColorChooser1.Value, 6)))
+  Case "Screen-Colour"
+    Func.Debug_Msg("Changing syslinux screen-colour colour: " & LCase(Hex(ColorChooser1.Value, 6)))
+    ' [GB2:BCOL] Panel1.BackColor = ColorChooser1.Value
+    Panel1.Background = ColorChooser1.Value
+    ' [GB2:BCOL] Selected.BackColor = ColorChooser1.Value
+    SelectedText.Background = ColorChooser1.Value
+    Func.Replace_Str_AsIs(WorkDir & "/ISO/isolinux/gfxboot.cfg", "screen-colour=0x", LCase(Hex(ColorChooser1.Value, 6)))
+  End Select
+End
+
+Public Sub SetColourMode_Click()
+  Func.Debug_Msg("Changed syslinux colour mode")
+  ColorChooser1.ToolTip = "Change the colour used for " & SetColourMode.Text
+End

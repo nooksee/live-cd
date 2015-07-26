@@ -1,0 +1,285 @@
+# Gambas Form File 3.0
+
+{ Form Form
+  MoveScaled(0,0,46,37)
+  #Translate = False
+  Icon = Picture["live-cd.svg"]
+  Resizable = False
+  { Menu Menu
+    Text = ("Main")
+    { Downloader Menu
+      #Translate = False
+      Text = "Get Ubuntu"
+      Picture = Picture["icon:/16/download"]
+    }
+    { Extract_ISO Menu
+      #Translate = False
+      Text = "Image File From Disk"
+      Picture = Picture["icon:/16/cdrom"]
+    }
+    { Settings Menu
+      Text = ("Settings")
+      Picture = Picture["icon:/16/options"]
+      Shortcut = "Ctrl+S"
+    }
+    { Quit Menu
+      Text = ("Quit")
+      Picture = Picture["icon:/16/quit"]
+      Shortcut = "Ctrl+Q"
+    }
+  }
+  { Extras_Menu Menu
+    Text = ("Extras")
+    Enabled = False
+    { Tweaks Menu
+      Text = ("Advanced Settings")
+      Picture = Picture["icon:/16/tools"]
+    }
+    { Exec_Hook Menu
+      Text = ("Execute Hook")
+      Picture = Picture["icon:/16/exec"]
+    }
+    { Install_GUI Menu
+      Text = ("Install Desktop Environment")
+      Picture = Picture["icon:/16/system"]
+    }
+    { SysLinux Menu
+      Text = ("Customize Bootloader")
+      Picture = Picture["icon:/16/cdrom"]
+    }
+    { Grub2 Menu
+      Text = ("Customize Boot Manager")
+      Picture = Picture["icon:/16/properties"]
+    }
+    { List_Packages Menu
+      Text = ("List Installed Packages")
+      Picture = Picture["icon:/16/text"]
+    }
+  }
+  { Directories Menu
+    Text = ("Directories")
+    Enabled = False
+    { Browse_FS Menu
+      Text = ("FileSystem")
+      Picture = Picture["icon:/16/directory"]
+    }
+    { Browse_FS_boot Menu
+      Text = ("FileSystem/boot")
+      Picture = Picture["icon:/16/directory"]
+    }
+    { Browse_FS_etc Menu
+      Text = ("FileSystem/etc")
+      Picture = Picture["icon:/16/directory"]
+    }
+    { Browse_FS_etc_default Menu
+      Text = ("FileSystem/etc/default")
+      Picture = Picture["icon:/16/directory"]
+    }
+    { Browse_FS_etc_skel Menu
+      Text = ("FileSystem/etc/skel")
+      Picture = Picture["icon:/16/directory"]
+    }
+    { Browse_FS_root Menu
+      Text = ("FileSystem/root")
+      Picture = Picture["icon:/16/directory"]
+    }
+    { Browse_FS_usr Menu
+      Text = ("FileSystem/usr")
+      Picture = Picture["icon:/16/directory"]
+    }
+    { Browse_FS_usr_share Menu
+      Text = ("FileSystem/usr/share")
+      Picture = Picture["icon:/16/directory"]
+    }
+    { Browse_ISO Menu
+      Text = ("ISO")
+      Picture = Picture["icon:/16/directory"]
+    }
+    { Browse_ISO_isolinux Menu
+      Text = ("ISO/isolinux")
+      Picture = Picture["icon:/16/directory"]
+    }
+  }
+  { Files Menu
+    Text = ("Files")
+    Enabled = False
+    { Edit_casper_conf Menu
+      Text = ("/etc/casper.conf")
+      Picture = Picture["icon:/16/edit"]
+    }
+    { Edit_lsb_release Menu
+      Text = ("/etc/lsb-release")
+      Picture = Picture["icon:/16/edit"]
+    }
+    { Edit_os_release Menu
+      Text = ("/etc/os-release")
+      Picture = Picture["icon:/16/edit"]
+    }
+    { Edit_etc_default_grub Menu
+      Text = ("/etc/default/grub")
+      Picture = Picture["icon:/16/edit"]
+    }
+    { Edit_etc_grub_d_05_debian_theme Menu
+      Text = ("/etc/grub.d/05_debian_theme")
+      Picture = Picture["icon:/16/edit"]
+    }
+    { Edit_etc_gtk_3_0_settings_ini Menu
+      Text = ("/etc/gtk-3.0/settings.ini")
+      Picture = Picture["icon:/16/edit"]
+    }
+    { Edit_motd Menu
+      Text = ("/etc/update-motd.d/10-help-text")
+      Picture = Picture["icon:/16/edit"]
+    }
+    { Edit_boot_grub_grub_cfg Menu
+      Text = ("/ISO/boot/grub/grub.cfg")
+      Picture = Picture["icon:/16/edit"]
+    }
+  }
+  { Help Menu
+    Text = ("Help")
+    { Credits Menu
+      Text = ("Credits")
+      Picture = Picture["icon:/16/people"]
+      Shortcut = "Ctrl+C"
+    }
+    { License Menu
+      Text = ("License")
+      Picture = Picture["icon:/16/text"]
+      Shortcut = "Ctrl+L"
+    }
+    { About Menu
+      Text = ("About")
+      Picture = Picture["icon:/16/info"]
+      Shortcut = "Ctrl+A"
+    }
+  }
+  { Frame1 Frame
+    MoveScaled(1,6,44,27)
+    Text = (" Distribution")
+    { ReleaseNotesURL TextBox
+      MoveScaled(2,21,40,4)
+      Enabled = False
+      Text = ("http://www.ubuntu.com/getubuntu/releasenotes")
+      Alignment = Align.Left
+    }
+    { Label3 Label
+      MoveScaled(2,18,41,3)
+      Text = ("Release Notes")
+      Alignment = Align.Left
+    }
+    { Version TextBox
+      MoveScaled(23,6,19,4)
+      Enabled = False
+      Text = ("14.04")
+    }
+    { Label1 Label
+      MoveScaled(23,3,20,3)
+      Text = ("Version")
+      Alignment = Align.Left
+    }
+    { LiveCD_User TextBox
+      MoveScaled(2,13,19,4)
+      Enabled = False
+      Text = ("ubuntu")
+    }
+    { Label4 Label
+      MoveScaled(2,10,19,3)
+      Text = ("User")
+      Alignment = Align.Left
+    }
+    { DistName TextBox
+      MoveScaled(2,6,19,4)
+      Enabled = False
+      Mouse = Mouse.Text
+      Text = ("Ubuntu")
+    }
+    { Label6 Label
+      MoveScaled(2,3,19,3)
+      Text = ("Name")
+      Alignment = Align.Left
+    }
+    { HostName TextBox
+      MoveScaled(23,13,19,4)
+      Enabled = False
+      Text = ("ubuntu")
+    }
+    { Label5 Label
+      MoveScaled(23,10,20,3)
+      Text = ("Host")
+      Alignment = Align.Left
+    }
+  }
+  { QEMU Button
+    MoveScaled(37,1,4,4)
+    #Translate = False
+    Enabled = False
+    ToolTip = "Test build using desktop emulator"
+    Picture = Picture["icons/computer.png"]
+    Border = False
+  }
+  { Build_ISO Button
+    MoveScaled(32,1,4,4)
+    Enabled = False
+    ToolTip = ("Rebuild distribution")
+    Picture = Picture["icons/build.png"]
+    Border = False
+  }
+  { Clean Button
+    MoveScaled(41,1,4,4)
+    #Translate = False
+    Enabled = False
+    ToolTip = "Clean all temp files and directories"
+    Picture = Picture["icons/clean.png"]
+    Border = False
+  }
+  { UseImage Button
+    MoveScaled(1,1,4,4)
+    #Translate = False
+    ToolTip = "Select image file to be used as the base for distribution"
+    Picture = Picture["icons/image.png"]
+    Border = False
+  }
+  { Edit_Sources Button
+    MoveScaled(5,1,4,4)
+    #Translate = False
+    Enabled = False
+    ToolTip = "Edit sources.list via text editor"
+    Picture = Picture["icons/edit.png"]
+    Border = False
+  }
+  { Install_DEB Button
+    MoveScaled(15,1,4,4)
+    #Translate = False
+    Enabled = False
+    ToolTip = "Install debian package"
+    Picture = Picture["icons/deb.png"]
+    Border = False
+  }
+  { Archive Button
+    MoveScaled(20,1,4,4)
+    #Translate = False
+    Enabled = False
+    ToolTip = "Run package manager to upgrade, install or purge packages"
+    Picture = Picture["icons/synaptic.png"]
+    Border = False
+  }
+  { Terminal Button
+    MoveScaled(10,1,4,4)
+    #Translate = False
+    Enabled = False
+    ToolTip = "Modify distribution using chroot terminal"
+    Picture = Picture["icons/terminal.png"]
+    Border = False
+  }
+  { Desktop Button
+    MoveScaled(25,1,4,4)
+    Enabled = False
+    ToolTip = ("Modify distribution using virtual desktop")
+    Picture = Picture["icons/desktop.png"]
+    Border = False
+  }
+  { Separator1 Separator
+    MoveScaled(30,1,1,4)
+  }
+}

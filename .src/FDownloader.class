@@ -1,0 +1,78 @@
+' Gambas class file
+
+Private $sAllWgetOutput As String
+
+Public Sub Form_Open()
+  Me.Center
+  Me.Caption = "Get Ubuntu"
+  Dir.Root = "/home"
+  ProgressBar1.Value = 0
+
+  Release.Add("Ubuntu Base Install (i386)")
+  Release.Add("Ubuntu Base Install (amd64)")
+  Release.Add("Ubuntu Full Install (i386)")
+  Release.Add("Ubuntu Full Install (amd64)")
+End
+
+Public Sub Download_Click()
+  Dim HTTP, FileName As String
+  Dim procWget As Process
+
+  $sAllWgetOutput = ""
+  ProgressBar1.Value = 0
+  Wait
+
+  Select Case Release.Text
+    Case "Ubuntu Full Install  (i386)"
+      HTTP = "http://releases.ubuntu.com/14.04/ubuntu-14.04.2-desktop-i386.iso"
+      FileName = "ubuntu-14.04.2-desktop-i386.iso"
+    Case "Ubuntu Full Install (amd64)"
+      HTTP = "http://releases.ubuntu.com/14.04/ubuntu-14.04.2-desktop-amd64.iso"
+      FileName = "ubuntu-14.04.2-desktop-amd64.iso"
+    Case "Ubuntu Base Install (i386)"
+      HTTP = "http://www.ubuntu-mini-remix.org/download/12.04/ubuntu-mini-remix-12.04-i386.iso"
+      FileName = "ubuntu-mini-remix-12.04-i386.iso"
+    Case "Ubuntu Base Install (amd64)"
+      HTTP = "http://www.ubuntu-mini-remix.org/download/12.04/ubuntu-mini-remix-12.04-amd64.iso"
+      FileName = "ubuntu-mini-remix-12.04-amd64.iso"
+    End Select
+  
+  ProgressBar1.Visible = True
+  Cancel.Visible = True
+  procWget = Shell "wget -O " & Dir.Value & "/" & FileName & " " & HTTP For Input As "DownloadProgress"
+End
+
+Public Sub DownloadProgress_Read()
+  Dim sWgetMessage As String
+  Dim sPercentuale As String
+  
+  Read #Last, sWgetMessage, -256
+  
+  If InStr(sWgetMessage, "http://") > 0 Then Return
+
+  $sAllWgetOutput &= sWgetMessage
+
+  If InStr(sWgetMessage, "%") > 0 Then
+    sPercentuale = Split(sWgetMessage, "%", "", True)[0]
+    sPercentuale = Trim$(Replace$(sPercentuale, ".", ""))
+    Try ProgressBar1.Value = Val(sPercentuale) / 100
+    Wait 0.01
+
+    If InStr($sAllWgetOutput, "100%") > 0 Then
+      ProgressBar1.Value = 1
+      Message.Info(("Download completed!"))
+      Wait
+    Endif
+  Endif
+End
+
+Public Sub Cancel_Click()
+  Shell "killall wget"
+  ProgressBar1.Visible = False
+  Cancel.Visible = False
+End
+
+Public Sub Quit_Click()
+  Me.Close
+  FMain.Show
+End

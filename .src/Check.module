@@ -1,0 +1,117 @@
+' Gambas module file
+
+Public WorkDir As String = Func.Get_Str("/etc/live-cd/default", "WORK_DIR=", "/home/live-cd")
+
+Public Sub Main()
+Dim Ret As String
+
+If System.User.Id <> 0 Then
+   Exec ["which", "gksu"] To Ret
+   If InStr(Ret, "gksu") Then
+      Exec ["gksu", Application.Path &/ "live-cd"]
+   Else
+      Exec ["which", "kdesu"] To Ret
+      If InStr(Ret, "kdesu") Then
+         Exec ["kdesu", Application.Path &/ "live-cd"]
+      Else
+         Message.Warning("No gksu or kdesu available!")
+      Endif
+   Endif
+   Quit
+Endif
+
+FMain.Show
+
+End
+
+Public Sub Conf_File()
+   Func.Event_Msg("Checking configuration file")
+   If Not Exist("/etc/live-cd/default") Then
+      Message.Warning("Configuration file does not exist, creating one with the default values")
+      Func.Event_Msg("[TRY] Restore configuration file")
+      File.Save("/etc/live-cd/default", "WORK_DIR=/home/live-cd\nMOUNT_DIR=/mnt\n\n# Preferences\nMESSAGES_COLORS=1\nFORCE_CHROOT=0\nAPT_HELPER=1\nRESOLUTION=1024x768\nBOOT_FILES=0\nVRAM=1024\nCOMPRESSION=xz\nLOCALES=C\n\n# Saved variables\nISO=\nDEB=\nHOOK=\nPIC=")
+      Catch
+      Message.Error("Unable to create configuration file, check your permissions")
+   Endif
+End
+
+Public Sub X_session()
+   Dim Xsessions As Integer = 0
+   Func.Event_Msg("Checking for x-session links")
+   Try Xsessions = Dir(WorkDir & "/FileSystem/usr/share/xsessions").Count
+   If Xsessions >= 1 Then
+      FMain.Desktop.Enabled = True
+   Else
+      FMain.Desktop.Enabled = False
+   Endif
+End
+
+Public Sub Pkg_Manager()
+  Func.Event_Msg("Searching for package manager")
+  If Exist(WorkDir & "/FileSystem/bin/synaptic") Or Exist(WorkDir & "/FileSystem/bin/aptitude") Then
+    FMain.Archive.Enabled = True
+  Else If Exist(WorkDir & "/FileSystem/sbin/synaptic") Or Exist(WorkDir & "/FileSystem/sbin/aptitude") Then
+    FMain.Archive.Enabled = True
+  Else If Exist(WorkDir & "/FileSystem/usr/bin/synaptic") Or Exist(WorkDir & "/FileSystem/usr/bin/aptitude") Then
+    FMain.Archive.Enabled = True
+  Else If Exist(WorkDir & "/FileSystem/usr/sbin/synaptic") Or Exist(WorkDir & "/FileSystem/usr/sbin/aptitude") Then
+     FMain.Archive.Enabled = True 
+  Else
+    FMain.Archive.Enabled = False
+  Endif
+End
+
+Public Sub ISO()
+  Dim Dist, Arch, Rel As String
+  
+  Func.Event_Msg("Checking if image file exists")
+  Dist = Func.Get_Str(WorkDir & "/FileSystem/etc/lsb-release", "DISTRIB_ID=", "Custom")
+  Rel = Func.Get_Str(WorkDir & "/FileSystem/etc/lsb-release", "DISTRIB_RELEASE=", "13.10")
+  
+  Shell "chroot '" & WorkDir & "/FileSystem' dpkg --print-architecture" To Arch
+  
+  If Exist(WorkDir & "/" & Dist & "-" & Trim(Arch) & "-" & Rel & ".iso") Then
+    FMain.QEMU.Enabled = True
+  Endif
+End
+
+Public Sub Existence()
+  Func.Event_Msg("Checking for essential directories and files")
+  If Exist(WorkDir & "/FileSystem") And Exist(WorkDir & "/ISO") Then
+    If Not Exist(WorkDir & "/FileSystem/root") Or Not Exist(WorkDir & "/FileSystem/etc") Or Not Exist(WorkDir & "/FileSystem/usr") Then
+      Message.Error("Some important directories and or files are missing!")
+      FMain.Clean.Enabled = True
+    Else
+      If Not Exist(WorkDir & "/FileSystem/etc/casper.conf") Or Not Exist(WorkDir & "/FileSystem/etc/lsb-release") Then
+        Message.Error(WorkDir & "/FileSystem/etc/casper.conf or " & WorkDir & "/FileSystem/etc/lsb-release\nare deleted but are very essential for setting up some configuration.\nCreate them using a text editor or clean and start all over again!")
+        Func.Disable_Stuff()
+        FMain.Clean.Enabled = True
+      Else
+        'Enable some elements
+        Func.Enable_Stuff()
+      
+        'Get some configuration to display it in the text boxes
+        FMain.HostName.Text = Func.Get_Str(WorkDir & "/FileSystem/etc/casper.conf", "export HOST=", "host")
+        FMain.LiveCD_User.Text = Func.Get_Str(WorkDir & "/FileSystem/etc/casper.conf", "export USERNAME=", "live")
+        FMain.Version.Text = Func.Get_Str(WorkDir & "/FileSystem/etc/lsb-release", "DISTRIB_RELEASE=", "13.10")
+        FMain.DistName.Text = Func.Get_Str(WorkDir & "/FileSystem/etc/lsb-release", "DISTRIB_ID=", "Custom")
+        
+        'Set/Load the release notes URL
+        FMain.ReleaseNotesURL.Text = "http://www.ubuntu.com/getubuntu/releasenotes"
+        FMain.ReleaseNotesURL.Text = Trim(Func.Load_File(WorkDir & "/ISO/.disk/release_notes_url"))
+        
+        'Check if previously built image exists
+        Check.ISO()
+        
+        'Check if desktop environment is installed
+        Check.X_session()
+        
+        'Check if package manager is installed
+        Check.Pkg_Manager()
+      Endif
+    Endif
+  Else
+    Func.Disable_Stuff()
+  Endif
+
+End

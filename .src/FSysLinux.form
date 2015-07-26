@@ -1,0 +1,51 @@
+# Gambas Form File 3.0
+
+{ Form Form
+  MoveScaled(0,0,94,44)
+  Icon = Picture["icon:/16/properties"]
+  Resizable = False
+  { Panel1 Panel
+    MoveScaled(1,1,46,36)
+  }
+  { SplashPic PictureBox
+    MoveScaled(2,2,44,34)
+    ToolTip = ("Preview isolinux splash image")
+    Stretch = True
+  }
+  { Quit Button
+    MoveScaled(39,39,16,4)
+    ToolTip = ("Close this window")
+    Text = ("Close")
+    Picture = Picture["icon:/16/close"]
+  }
+  { ColorChooser1 ColorChooser
+    MoveScaled(49,2,44,35)
+  }
+  { SelectedText Label
+    MoveScaled(13,20,24,4)
+    Font = Font["+2"]
+    Text = ("Selected")
+    Alignment = Align.Center
+  }
+  { SetColourMode ComboBox
+    MoveScaled(68,39,17,4)
+    #Translate = False
+    ToolTip = "Set which colour should be changed"
+    ReadOnly = True
+    List = ["Selected", "Normal", "Screen-Colour"]
+    Text = "ComboBox1"
+  }
+  { ChangePic Button
+    MoveScaled(7,39,16,4)
+    ToolTip = ("Change isolinux splash image")
+    Text = ("Change Splash")
+    Picture = Picture["icon:/16/image"]
+  }
+  { NormalText Label
+    MoveScaled(13,25,24,4)
+    Font = Font["+2"]
+    Text = ("Normal")
+    Alignment = Align.Center
+    Transparent = True
+  }
+}

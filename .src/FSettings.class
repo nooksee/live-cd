@@ -1,0 +1,162 @@
+' Gambas class file
+
+
+Public Sub Form_Open()
+  Me.Center
+  Me.Caption = "Settings"
+  
+  Check.Conf_File()
+  
+  LocalesBox.Add("C")
+  LocalesBox.Add("POSIX")
+  LocalesBox.Add("bokmal")
+  LocalesBox.Add("catalan")
+  LocalesBox.Add("croatian")
+  LocalesBox.Add("czech")
+  LocalesBox.Add("danish")
+  LocalesBox.Add("dansk")
+  LocalesBox.Add("deutsch")
+  LocalesBox.Add("dutch")
+  LocalesBox.Add("eesti")
+  LocalesBox.Add("estonian")
+  LocalesBox.Add("finnish")
+  LocalesBox.Add("french")
+  LocalesBox.Add("galego")
+  LocalesBox.Add("galician")
+  LocalesBox.Add("german")
+  LocalesBox.Add("greek")
+  LocalesBox.Add("hebrew")
+  LocalesBox.Add("hrvatski")
+  LocalesBox.Add("hungarian")
+  LocalesBox.Add("icelandic")
+  LocalesBox.Add("italian")
+  LocalesBox.Add("japanese")
+  LocalesBox.Add("japanese.euc")
+  LocalesBox.Add("ja_JP")
+  LocalesBox.Add("ja_JP.ujis")
+  LocalesBox.Add("japanese.sjis")
+  LocalesBox.Add("korean ")
+  LocalesBox.Add("korean.euc")
+  LocalesBox.Add("ko_KR ")
+  LocalesBox.Add("lithuanian")
+  LocalesBox.Add("no_NO")
+  LocalesBox.Add("norwegian")
+  LocalesBox.Add("nynorsk")
+  LocalesBox.Add("polish")
+  LocalesBox.Add("portuguese")
+  LocalesBox.Add("romanian")
+  LocalesBox.Add("russian")
+  LocalesBox.Add("slovak")
+  LocalesBox.Add("slovene")
+  LocalesBox.Add("slovenian")
+  LocalesBox.Add("spanish")
+  LocalesBox.Add("swedish")
+  LocalesBox.Add("thai")
+  LocalesBox.Add("turkish")
+  
+  
+  WorkDir.Text = Func.Get_Str("/etc/live-cd/default", "WORK_DIR=", "/home")
+  MountDir.Text = Func.Get_Str("/etc/live-cd/default", "MOUNT_DIR=", "/media/ISO")
+  UseColors.Value = Func.Get_Str("/etc/live-cd/default", "MESSAGES_COLORS=", "1")
+  ForceChroot.Value = Func.Get_Str("/etc/live-cd/default", "FORCE_CHROOT=", "0")
+  AptHelper.Value = Func.Get_Str("/etc/live-cd/default", "APT_HELPER=", "1")
+  BootFiles.Value = Func.Get_Str("/etc/live-cd/default", "BOOT_FILES=", "0")
+  VirtualMemBox.Text = Func.Get_Str("/etc/live-cd/default", "VRAM=", "256")
+  ResolutionBox.Text = Func.Get_Str("/etc/live-cd/default", "RESOLUTION=", "800x600")
+  CompressionBox.Text = Func.Get_Str("/etc/live-cd/default", "COMPRESSION=", "tar")
+  LocalesBox.Text = Func.Get_Str("/etc/live-cd/default", "LOCALES=", "")
+  
+  If FMain.Build_ISO.Enabled = True Then
+    Change_WDir.Enabled = False
+    Change_WDir.ToolTip = "Changing the working directory is not possible!"
+  Endif
+End
+
+Public Sub UseColors_Click()
+  If UseColors.Value = 0 Then
+    Func.Replace_Str("/etc/live-cd/default", "MESSAGES_COLORS=", "0")
+  Else
+    Func.Replace_Str("/etc/live-cd/default", "MESSAGES_COLORS=", "1")
+  Endif
+End
+
+Public Sub ForceChroot_Click()
+  If ForceChroot.Value = 0 Then
+    Func.Replace_Str("/etc/live-cd/default", "FORCE_CHROOT=", "0")
+  Else
+    Func.Replace_Str("/etc/live-cd/default", "FORCE_CHROOT=", "1")
+  Endif
+End
+
+Public Sub AptHelper_Click()
+  If AptHelper.Value = 0 Then
+    Func.Replace_Str("/etc/live-cd/default", "APT_HELPER=", "0")
+  Else
+    Func.Replace_Str("/etc/live-cd/default", "APT_HELPER=", "1")
+  Endif
+End
+
+Public Sub BootFiles_Click()
+  If BootFiles.Value = 0 Then
+    Func.Replace_Str("/etc/live-cd/default", "BOOT_FILES=", "0")
+  Else
+    Func.Replace_Str("/etc/live-cd/default", "BOOT_FILES=", "1")
+  Endif
+End
+
+Public Sub ResolutionBox_Click()
+  Func.Replace_Str("/etc/live-cd/default", "RESOLUTION=", ResolutionBox.Text)
+End
+
+Public Sub VirtualMemBox_Click()
+  Func.Replace_Str("/etc/live-cd/default", "VRAM=", VirtualMemBox.Text)
+End
+
+Public Sub Change_WDir_Click()
+  Dim WDir As String
+
+  WDir = Func.Get_Str("/etc/live-cd/default", "WORK_DIR=", "/home")
+  
+  Dialog.Title = "Please, select work directory"
+  
+  If Exist(WDir) Then
+    Dialog.Path = WDir
+  Else
+    Dialog.Path = "/home"
+  Endif
+  
+  If Dialog.SelectDirectory() Then Return
+  Func.Replace_Str("/etc/live-cd/default", "WORK_DIR=", Dialog.Path)
+  WorkDir.Text = Dialog.Path
+End
+
+Public Sub Change_MDir_Click()
+  Dim MDir As String
+  
+  MDir = Func.Get_Str("/etc/live-cd/default", "MOUNT_DIR=", "/media/ISO")
+  
+  Dialog.Title = "Please, select work directory"
+  
+  If Exist(MDir) Then
+    Dialog.Path = MDir
+  Else
+    Dialog.Path = "/home"
+  Endif
+  
+  If Dialog.SelectDirectory() Then Return
+  Func.Replace_Str("/etc/live-cd/default", "MOUNT_DIR=", Dialog.Path)
+  MountDir.Text = Dialog.Path
+End
+
+Public Sub CompressionBox_Click()
+  Func.Replace_Str("/etc/live-cd/default", "COMPRESSION=", CompressionBox.Text)
+End
+
+
+Public Sub LocalesBox_Click()
+  Func.Replace_Str("/etc/live-cd/default", "LOCALES=", LocalesBox.Text)
+End
+
+Public Sub Quit_Click()
+  Me.Close
+End

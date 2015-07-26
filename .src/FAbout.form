@@ -1,0 +1,34 @@
+# Gambas Form File 3.0
+
+{ Form Form
+  MoveScaled(0,0,41,30)
+  Icon = Picture["icon:/small/info"]
+  Resizable = False
+  { Label12 Label
+    MoveScaled(2,1,37,4)
+    Font = Font["URW Bookman L,Bold,+5"]
+    Text = ("LiveCD Creator 3")
+    Alignment = Align.Center
+  }
+  { Quit Button
+    MoveScaled(15,25,11,4)
+    ToolTip = ("Close this window")
+    Text = ("Close")
+    Picture = Picture["icon:/16/close"]
+  }
+  { PictureBox1 PictureBox
+    MoveScaled(16,7,8,8)
+    #Translate = False
+    Picture = Picture["live-cd.svg"]
+    Stretch = True
+    AutoResize = True
+    Alignment = Align.Center
+  }
+  { Credits TextLabel
+    MoveScaled(1.5,16,38,8)
+    #Translate = False
+    Text = "An advanced LiveCD customization and remastering tool."
+    Alignment = Align.Center
+    Transparent = True
+  }
+}

@@ -1,0 +1,52 @@
+# Gambas Form File 3.0
+
+{ Form Form
+  MoveScaled(0,0,57,53)
+  { Panel1 Panel
+    MoveScaled(1,2,55,36)
+  }
+  { SplashPic PictureBox
+    MoveScaled(2,3,53,34)
+    ToolTip = ("Preview of Grub splash image")
+    Stretch = True
+  }
+  { Quit Button
+    MoveScaled(20.5,48,16,4)
+    ToolTip = ("Close this window")
+    Text = ("Close")
+    Picture = Picture["icon:/16/close"]
+  }
+  { SelectedText Label
+    MoveScaled(17.5,13,24,4)
+    Font = Font["+2"]
+    Text = ("Selected")
+    Alignment = Align.Center
+  }
+  { ChangePic Button
+    MoveScaled(40,40,16,4)
+    ToolTip = ("Change grub splash image")
+    Text = ("Change Splash")
+    Picture = Picture["icon:/16/image"]
+  }
+  { NormalText Label
+    MoveScaled(17.5,17,24,4)
+    Font = Font["+2"]
+    Text = ("Normal")
+    Alignment = Align.Center
+  }
+  { ModeBox ComboBox
+    MoveScaled(1,40,12,4)
+    ToolTip = ("Set which colour should be changed")
+    ReadOnly = True
+  }
+  { Color1Box ComboBox
+    MoveScaled(14,40,12,4)
+    ReadOnly = True
+    List = [("black"), ("blue"), ("white"), ("brown"), ("cyan"), ("yellow"), ("magenta"), ("red"), ("green"), ("dark-gray"), ("light-cyan"), ("light-blue"), ("light-green"), ("light-gray"), ("light-magenta"), ("light-red")]
+  }
+  { Color2Box ComboBox
+    MoveScaled(27,40,12,4)
+    ReadOnly = True
+    List = [("black"), ("blue"), ("white"), ("brown"), ("cyan"), ("yellow"), ("magenta"), ("red"), ("green"), ("dark-gray"), ("light-cyan"), ("light-blue"), ("light-green"), ("light-gray"), ("light-magenta"), ("light-red")]
+  }
+}

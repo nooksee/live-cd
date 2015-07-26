@@ -1,0 +1,303 @@
+' Gambas class file
+
+' Main Form
+
+Public WorkDir As String = Func.Get_Str("/etc/live-cd/default", "WORK_DIR=", "/home/live-cd")
+
+Public Sub Form_Open()
+Dim STATUS As Variant
+  Me.Center
+  DistName.MaxLength = 16
+  HostName.MaxLength = 16
+  LiveCD_User.MaxLength = 16
+  Func.Event_Msg("Checking if LiveCD Creator is locked")
+  If Exist("/etc/live-cd/gui_lock") Then
+    Message.Warning("Another instance of LiveCD Creator is already running!")
+    Me.Close
+  Else
+    Func.Event_Msg("Locking LiveCD Creator")
+    Try File.Save("/etc/live-cd/gui_lock", "")
+  Endif
+  
+  Check.Conf_File()
+  Check.Existence()
+End
+
+' Main Buttons
+Public Sub UseImage_Click()
+  Dim ISO As String
+  ISO = Func.Get_Str("/etc/live-cd/default", "ISO=", "")
+  Dialog.Title = "Please select an image file"
+  Dialog.Filter = ["*.iso", "ISO Images"]
+  
+  If Exist(ISO) Then
+    Dialog.Path = ISO
+  Else
+    Dialog.Path = "/home"
+  Endif
+  
+  If Dialog.OpenFile() Then Return
+  Func.Replace_Str("/etc/live-cd/default", "ISO=", Dialog.Path)
+  Func.Event_Msg("Extracting image file")
+  Exec [Func.Use_Term(), "-e", "/usr/bin/live-cd.sh -e"] Wait
+  Check.Existence()
+End
+
+Public Sub Edit_Sources_Click()
+  Func.Edit_File("/FileSystem/etc/apt/sources.list")
+End
+
+Public Sub Desktop_Click()
+  Func.Debug_Msg("Launching nested x-session")
+  Exec [Func.Use_Term(), "-e", "/usr/bin/live-cd.sh -x"] Wait
+  Check.Pkg_Manager()
+End
+
+Public Sub Terminal_Click()
+  Func.Debug_Msg("Launching chroot terminal")
+  Exec [Func.Use_Term(), "-e", "/usr/bin/live-cd.sh -c"] Wait
+  Check.X_session()
+  Check.Pkg_Manager()
+End
+
+Public Sub Build_ISO_Click()
+  If DistName.Text = "" Or If HostName.Text = "" Or If LiveCD_User.Text = "" Or If Version.Text = "" Or If ReleaseNotesURL.Text = "" Then
+    Message.Warning("One or more of the configuration fields are blank!")
+  Else
+    Func.Event_Msg("Rebuilding image file")
+    Exec [Func.Use_Term(), "-e", "/usr/bin/live-cd.sh -r"] Wait
+  Endif
+  
+  Check.ISO()
+End
+
+Public Sub Clean_Click()
+  Func.Event_Msg("Cleaning work directories")
+  Exec [Func.Use_Term(), "-e", "/usr/bin/live-cd.sh -t"] Wait
+  Func.Disable_Stuff
+  Build_ISO.Text = "Build Image"
+End
+
+Public Sub Install_DEB_Click()
+  Dim DEB As String
+  DEB = Func.Get_Str("/etc/live-cd/default", "DEB=", "")
+  Dialog.Title = "Please select a debian package"
+  Dialog.Filter = ["*.deb", "Debian Packages"]
+  
+  If Exist(DEB) Then
+    Dialog.Path = DEB
+  Else
+    Dialog.Path = "/home"
+  Endif
+  
+  If Dialog.OpenFile() Then Return
+  Func.Replace_Str("/etc/live-cd/default", "DEB=", Dialog.Path)
+  Func.Event_Msg("Installing debian package")
+  Exec [Func.Use_Term(), "-e", "/usr/bin/live-cd.sh -d"] Wait
+  Check.X_session()
+  Check.Pkg_Manager()
+End
+
+Public Sub Archive_Click()
+  Func.Event_Msg("Launching package manager")
+  Exec [Func.Use_Term(), "-e", "/usr/bin/live-cd.sh -p"] Wait
+  Check.X_session()
+End
+
+Public Sub QEMU_Click()
+  Func.Event_Msg("Launching desktop emulator")
+  Exec [Func.Use_Term(), "-e", "/usr/bin/live-cd.sh -q"] Wait
+End
+
+' Change Configs
+Public Sub DistName_Change()
+  Func.Event_Msg("DistName.Text changed")
+  DistName.Text = Trim(DistName.Text)
+  Version.Text = Trim(Version.Text)
+  Func.Replace_Str_AsIs(WorkDir & "/FileSystem/etc/lsb-release", "DISTRIB_ID=", DistName.Text)
+  Func.Replace_Str_AsIs(WorkDir & "/FileSystem/etc/os-release", "NAME=", DistName.Text)
+  Func.Save_File(WorkDir & "/FileSystem/etc/issue", DistName.Text & " " & Version.Text & " \\n \\l")
+  Func.Save_File(WorkDir & "/FileSystem/etc/issue.net", DistName.Text & " " & Version.Text)
+End
+
+Public Sub HostName_Change()
+  Func.Event_Msg("HostName.Text changed")
+  HostName.Text = Trim(LCase(HostName.Text))
+  Func.Replace_Str(WorkDir & "/FileSystem/etc/casper.conf", "export HOST=", HostName.Text)
+  Func.Replace_Str(WorkDir & "/FileSystem/etc/casper.conf", "export FLAVOUR=", "custom")
+End
+
+Public Sub LiveCD_User_Change()
+  Func.Event_Msg("LiveCD_User.Text changed")
+  LiveCD_User.Text = Trim(LCase(LiveCD_User.Text))
+  Func.Replace_Str(WorkDir & "/FileSystem/etc/casper.conf", "export USERNAME=", LiveCD_User.Text)
+  Func.Replace_Str(WorkDir & "/FileSystem/etc/casper.conf", "export FLAVOUR=", "custom")
+End
+
+Public Sub Version_Change()
+  Func.Event_Msg("Version.Text changed")
+  DistName.Text = Trim(DistName.Text)
+  Version.Text = Trim(Version.Text)
+  Func.Replace_Str_AsIs(WorkDir & "/FileSystem/etc/lsb-release", "DISTRIB_RELEASE=", Version.Text)
+  Func.Replace_Str_AsIs(WorkDir & "/FileSystem/etc/os-release", "VERSION_ID=", Version.Text)
+  Func.Save_File(WorkDir & "/FileSystem/etc/issue", DistName.Text & " " & Version.Text & " \\n \\l")
+  Func.Save_File(WorkDir & "/FileSystem/etc/issue.net", DistName.Text & " " & Version.Text)
+End
+
+Public Sub ReleaseNotesURL_Change()
+  Func.Event_Msg("ReleaseNotesURL.Text changed")
+  Trim(ReleaseNotesURL.Text)
+  Func.Save_File(WorkDir & "/ISO/.disk/release_notes_url", ReleaseNotesURL.Text)
+End
+
+Public Sub Form_Close()
+Try Kill "/etc/live-cd/gui_lock"
+End
+
+'Menu - Main
+Public Sub Quit_Click()
+Me.Close(0)
+End
+
+Public Sub Settings_Click()
+  FSettings.Show
+End
+
+Public Sub Extract_ISO_Click()
+  Func.Event_Msg("Extracting image file from disk")
+  Exec [Func.Use_Term(), "-e", "/usr/bin/live-cd.sh -i"] Wait
+End
+
+'Menu - Extras
+Public Sub Exec_Hook_Click()
+  Dim HOOK As String
+  HOOK = Func.Get_Str("/etc/live-cd/default", "HOOK=", "")
+  Dialog.Title = "Please select hook file"
+  
+  If Exist(HOOK) Then
+    Dialog.Path = HOOK
+  Else
+    Dialog.Path = "/home"
+  Endif
+  
+  If Dialog.OpenFile() Then Return
+  Func.Event_Msg("Executing hook")
+  Func.Replace_Str("/etc/live-cd/default", "HOOK=", Dialog.Path)
+  Exec [Func.Use_Term(), "-e", "/usr/bin/live-cd.sh -k"] Wait
+  Check.X_session()
+  Check.Pkg_Manager()
+End
+
+Public Sub Install_GUI_Click()
+  Func.Event_Msg("Installing desktop environment")
+  Exec [Func.Use_Term(), "-e", "/usr/bin/live-cd.sh -g"] Wait
+  Check.X_session()
+  Check.Pkg_Manager()
+End
+  
+Public Sub Tweaks_Click()
+  FTweaks.Show
+End
+
+Public Sub List_Packages_Click()
+  FPackages.Show
+End
+
+Public Sub SysLinux_Click()
+  FSysLinux.Show
+End
+
+Public Sub Grub2_Click()
+  FGrub2.Show
+End
+
+' Browse directories
+Public Sub Browse_FS_Click()
+  Func.Browse_Dir("/FileSystem")
+End
+
+Public Sub Browse_ISO_Click()
+  Func.Browse_Dir("/ISO")
+End
+
+Public Sub Browse_FS_etc_skel_Click()
+  Func.Browse_Dir("/FileSystem/etc/skel")
+End
+
+Public Sub Browse_FS_etc_Click()
+  Func.Browse_Dir("/FileSystem/etc")
+End
+
+Public Sub Browse_FS_root_Click()
+  Func.Browse_Dir("/FileSystem/root")
+End
+
+Public Sub Browse_ISO_isolinux_Click()
+  Func.Browse_Dir("/ISO/isolinux")
+End
+
+Public Sub Browse_FS_usr_share_Click()
+  Func.Browse_Dir("/FileSystem/usr/share")
+End
+
+Public Sub Browse_FS_usr_Click()
+  Func.Browse_Dir("/FileSystem/usr")
+End
+
+Public Sub Browse_FS_etc_default_Click()
+  Func.Browse_Dir("/FileSystem/etc/default")
+End
+
+Public Sub Browse_FS_boot_Click()
+  Func.Browse_Dir("/FileSystem/boot")
+End
+
+' Edit files
+Public Sub Edit_casper_conf_Click()
+  Func.Edit_File("/FileSystem/etc/casper.conf")
+End
+
+Public Sub Edit_lsb_release_Click()
+  Func.Edit_File("/FileSystem/etc/lsb-release")
+End
+
+Public Sub Edit_os_release_Click()
+  Func.Edit_File("/FileSystem/etc/os-release")
+End
+
+Public Sub Edit_motd_Click()
+  Func.Edit_File("/FileSystem/etc/update-motd.d/10-help-text")
+End
+
+Public Sub Edit_etc_default_grub_Click()
+  Func.Edit_File("/FileSystem/etc/default/grub")
+End
+
+Public Sub Edit_etc_grub_d_05_debian_theme_Click()
+  Func.Edit_File("/FileSystem/etc/grub.d/05_debian_theme")
+End
+
+Public Sub Edit_etc_gtk_3_0_settings_ini_Click()
+  Func.Edit_File("/FileSystem/etc/gtk-3.0/settings.ini")
+End
+
+Public Sub Edit_boot_grub_grub_cfg_Click()
+  Func.Edit_File("/ISO/boot/grub/grub.cfg")
+End
+
+' About
+Public Sub About_Click()
+  FAbout.Show
+End
+
+Public Sub License_Click()
+  FLicense.Show
+End
+
+Public Sub Credits_Click()
+  FCredits.Show
+End
+
+Public Sub Downloader_Click()
+  FDownloader.Show
+End

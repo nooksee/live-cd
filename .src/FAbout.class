@@ -1,0 +1,16 @@
+' Gambas class file
+
+Public Sub Form_Open()
+  Me.Center
+  Me.Caption = "About"
+End
+
+Public Sub Quit_Click()
+  Me.Close
+End
+
+Public Sub PictureBox1_MouseDown()
+
+    
+
+End

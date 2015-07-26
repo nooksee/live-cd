@@ -1,0 +1,137 @@
+' Gambas class file
+
+Public WorkDir As String = Func.Get_Str("/etc/live-cd/default", "WORK_DIR=", "/home")
+
+Public Sub Form_Open()
+  Dim sZone, Frame As String
+  Dim tz_array As String[]
+  
+  Check.Conf_File()
+
+  Me.Center
+  Me.Caption = "Advanced Settings"
+  
+  For Each sZone In RDir(WorkDir & "/FileSystem/usr/share/zoneinfo/", "*", gb.Directory).Sort()
+    Zone.Add(sZone)
+  Next
+  
+  tz_array = Split(Func.Load_File(WorkDir & "/FileSystem/etc/timezone"), "/")
+  Zone.Text = tz_array[0]
+  
+  For Each sZone In Dir(WorkDir & "/FileSystem/usr/share/zoneinfo/" & Zone.Text, "*", gb.File).Sort()
+    Time.Add(sZone)
+  Next
+  Time.Text = tz_array[1]
+
+  If Exist(WorkDir & "/FileSystem/etc/apt/apt.conf") Then
+    APT_Recommends.Value = False
+  Else
+    APT_Recommends.Value = True
+  Endif
+  
+  If Exist(WorkDir & "/FileSystem/usr/share/initramfs-tools/conf-hooks.d/casper") Then
+    Frame = Func.Get_Str(WorkDir & "/FileSystem/usr/share/initramfs-tools/conf-hooks.d/casper", "FRAMEBUFFER=", "y")
+  
+    If Frame = "y" Then
+      Framebuffer.Value = True
+    Else
+      Framebuffer.Value = False
+    Endif
+  Else
+    Message.Warning("Casper hook file does not exist! You will\nnot be able to choose whether or not to use framebuffer.")
+    Framebuffer.Enabled = False
+  Endif
+  
+  TTYs.Text = Replace$(Replace$(Func.Get_Str(WorkDir & "/FileSystem/etc/default/console-setup", "ACTIVE_CONSOLES=", "6"), "/dev/tty[1-", ""), "]", "")
+  
+  If Exist(WorkDir & "/FileSystem/bin/ash") Then
+    SShell.Add("/bin/ash")
+  Endif
+  
+  If Exist(WorkDir & "/FileSystem/bin/sh") Then
+    SShell.Add("/bin/sh")
+  Endif
+  
+  If Exist(WorkDir & "/FileSystem/bin/csh") Then
+    SShell.Add("/bin/csh")
+  Endif
+  
+  If Exist(WorkDir & "/FileSystem/bin/ksh") Then
+    SShell.Add("/bin/ksh")
+  Endif
+  
+  If Exist(WorkDir & "/FileSystem/bin/mksh") Then
+    SShell.Add("/bin/mksh")
+  Endif
+  
+  If Exist(WorkDir & "/FileSystem/bin/tcsh") Then
+    SShell.Add("/bin/tcsh")
+  Endif
+  
+  If Exist(WorkDir & "/FileSystem/bin/bash") Then
+    SShell.Add("/bin/bash")
+  Endif
+  
+  If Exist(WorkDir & "/FileSystem/bin/dash") Then
+    SShell.Add("/bin/dash")
+  Endif
+  
+  If Exist(WorkDir & "/FileSystem/bin/psh") Then
+    SShell.Add("/bin/psh")
+  Endif
+  
+  If Exist(WorkDir & "/FileSystem/bin/zsh") Then
+    SShell.Add("/bin/zsh")
+  Endif
+  
+  If Exist(WorkDir & "/FileSystem/bin/yash") Then
+    SShell.Add("/bin/yash")
+  Endif
+  
+  SShell.Text = Func.Get_Str(WorkDir & "/FileSystem/etc/adduser.conf", "DSHELL=", "/bin/bash")
+End
+
+Public Sub APT_Recommends_Click()
+  If APT_Recommends.Value = True Then
+    Func.Debug_Msg("[TRY] Deleting: " & WorkDir & "/FileSystem/etc/apt/apt.conf")
+    Try Kill WorkDir & "/FileSystem/etc/apt/apt.conf"
+  Else
+    Func.Debug_Msg("[TRY] Saving to: " & WorkDir & "/FileSystem/etc/apt/apt.conf")
+    Try File.Save(WorkDir & "/FileSystem/etc/apt/apt.conf", "APT::Install-Recommends \"false\";\nAPT::Install-Suggests \"false\";")
+  Endif
+End
+
+
+Public Sub Time_Click()
+  Func.Save_File(WorkDir & "/FileSystem/etc/timezone", Zone.Text & "/" & Time.Text)
+End
+
+
+Public Sub Framebuffer_Click()
+  If Framebuffer.Value = True Then
+    Func.Replace_Str(WorkDir & "/FileSystem/usr/share/initramfs-tools/conf-hooks.d/casper", "FRAMEBUFFER=", "y")
+  Else
+    Func.Replace_Str(WorkDir & "/FileSystem/usr/share/initramfs-tools/conf-hooks.d/casper", "FRAMEBUFFER=", "n")
+  Endif
+End
+
+Public Sub Quit_Click()
+  Me.Close
+End
+
+Public Sub TTYs_Click()
+  Func.Replace_Str(WorkDir & "/FileSystem/etc/default/console-setup", "ACTIVE_CONSOLES=", "/dev/tty[1-" & TTYs.Text & "]")
+End
+
+Public Sub SShell_Click()
+  Func.Replace_Str(WorkDir & "/FileSystem/etc/adduser.conf", "DSHELL=", SShell.Text)
+End
+
+Public Sub Zone_Click()
+  Dim sZone As String
+  
+  Time.Clear
+  For Each sZone In Dir(WorkDir & "/FileSystem/usr/share/zoneinfo/" & Zone.Text, "*", gb.File).Sort()
+    Time.Add(sZone)
+  Next
+End

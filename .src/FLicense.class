@@ -1,0 +1,10 @@
+' Gambas class file
+
+Public Sub Form_Open()
+  Me.Center
+  Me.Caption = "License"
+End
+
+Public Sub Quit_Click()
+  Me.Close
+End

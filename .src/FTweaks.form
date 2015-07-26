@@ -1,0 +1,59 @@
+# Gambas Form File 3.0
+
+{ Form Form
+  MoveScaled(0,0,39,32)
+  Icon = Picture["icon:/16/tools"]
+  Resizable = False
+  { APT_Recommends CheckBox
+    MoveScaled(1,1,37,4)
+    ToolTip = ("Enable install of suggested and recommended packages")
+    Text = ("Suggested and Recommended Packages")
+  }
+  { Quit Button
+    MoveScaled(14,27,13,4)
+    Text = ("Close")
+    Picture = Picture["icon:/16/close"]
+  }
+  { Zone ComboBox
+    MoveScaled(16,10,10,4)
+    #Translate = False
+    ReadOnly = True
+    Text = "ComboBox1"
+  }
+  { Label1 Label
+    MoveScaled(1,10,9,4)
+    Text = ("TimeZone")
+    Alignment = Align.Left
+  }
+  { Framebuffer CheckBox
+    MoveScaled(1,5,18,4)
+    ToolTip = ("Use Framebuffer")
+    Text = ("Use Framebuffer")
+  }
+  { SShell ComboBox
+    MoveScaled(16,15,10,4)
+    ReadOnly = True
+    Text = ("ComboBox1")
+  }
+  { Label2 Label
+    MoveScaled(1,15,11,4)
+    Text = ("Default Shell")
+    Alignment = Align.Left
+  }
+  { TTYs ComboBox
+    MoveScaled(16,20,10,4)
+    ReadOnly = True
+    List = [("1"), ("2"), ("3"), ("4"), ("5"), ("6"), ("7"), ("8"), ("9"), ("10"), ("11")]
+    Text = ("ComboBox1")
+  }
+  { Label3 Label
+    MoveScaled(1,20,14,4)
+    Text = ("Active Consoles")
+    Alignment = Align.Left
+  }
+  { Time ComboBox
+    MoveScaled(28,10,10,4)
+    ReadOnly = True
+    Text = ("ComboBox1")
+  }
+}

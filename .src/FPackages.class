@@ -1,0 +1,60 @@
+' Gambas class file
+
+Public WorkDir As String = Func.Get_Str("/etc/live-cd/default", "WORK_DIR=", "/home")
+
+Public Sub Form_Open()
+  Dim TempFile As File
+  Dim items As String[]
+  Dim i, key As Integer
+  Dim textLine As String
+  
+  Check.Conf_File()
+  
+  Me.Center
+  Me.Caption = "Installed Packages "
+
+  Func.Event_Msg("Getting package list")
+  Shell "chroot '" & WorkDir & "/FileSystem' dpkg-query -W --showformat='${Package},${Version},${Priority},${Installed-Size}\n' | tee /tmp/PACKAGESLIST" Wait
+
+  ' [GB2:OPEN] OPEN "/tmp/PACKAGESLIST" FOR READ AS #TempFile
+  TempFile = Open "/tmp/PACKAGESLIST" For Read
+  ' Setup ColumnView
+  ColumnView1.Columns.Count = 4
+  ColumnView1.Columns[0].Text = "Package"
+  ColumnView1.Columns[1].Text = "Version"
+  ColumnView1.Columns[2].Text = "Priority"
+  ColumnView1.Columns[3].Text = "Installed-Size"
+  ' Loop through each line until the end of file.
+  ' Eof() returns true at the end of the file.
+  While Not Eof(TempFile)
+    Line Input #TempFile, textLine
+    ' Split each line into fields
+    ' Note that we set the " char as an escape char
+    items = Split(textLine, ",", "\"")
+    Inc key
+    ColumnView1.Add(key, items[0])
+    For i = 1 To items.Count - 1
+      ColumnView1[key][i] = items[i]
+    Next
+  Wend
+  Close #TempFile
+  Catch
+    Try Close #TempFile
+End
+
+Public Sub Quit_Click()
+  Me.Close
+End
+
+Public Sub Save_Click()
+  Dialog.Title = "Select where to save the list"
+  Dialog.Filter = ["*.txt", "Text Files"]
+  Dialog.Path = WorkDir
+
+  If Dialog.SaveFile() Then Return
+  Func.Debug_Msg("Saving package list: " & Dialog.Path & ".txt")
+  Copy "/tmp/PACKAGESLIST" To Dialog.Path & ".txt"
+  
+  Catch
+    Message.Error("Unable to copy /tmp/PACKAGESLIST to" & Dialog.Path)
+End

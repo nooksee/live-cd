@@ -1,0 +1,41 @@
+# Gambas Form File 3.0
+
+{ Form Form
+  MoveScaled(0,0,68,50)
+  Text = ("Download Ubuntu")
+  Icon = Picture["live-cd.png"]
+  Resizable = False
+  { Release ComboBox
+    MoveScaled(39,1,28,4)
+    ReadOnly = True
+  }
+  { Download Button
+    MoveScaled(1,40,17,4)
+    Text = ("Download")
+  }
+  { Label1 Label
+    MoveScaled(1,1,30,4)
+    Font = Font["Bold"]
+    Text = ("Select an Ubuntu release")
+  }
+  { Quit Button
+    MoveScaled(50,40,17,4)
+    Text = ("Quit")
+  }
+  { Dir DirChooser
+    MoveScaled(1,9,66,30)
+  }
+  { Label2 Label
+    MoveScaled(1,5,66,4)
+    Text = ("Select where the ISO image will be saved and press \"Download\"")
+  }
+  { ProgressBar1 ProgressBar
+    MoveScaled(1,45,45,4)
+    Visible = False
+  }
+  { Cancel Button
+    MoveScaled(50,45,17,4)
+    Visible = False
+    Text = ("Stop")
+  }
+}

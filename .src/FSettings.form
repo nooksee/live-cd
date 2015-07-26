@@ -1,0 +1,108 @@
+# Gambas Form File 3.0
+
+{ Form Form
+  MoveScaled(0,0,46,58)
+  Icon = Picture["icon:/small/options"]
+  Resizable = False
+  { Quit Button
+    MoveScaled(16.5,53,13,4)
+    ToolTip = ("Close this window")
+    Text = ("Close")
+    Picture = Picture["icon:/16/close"]
+  }
+  { BootFiles CheckBox
+    MoveScaled(1,27,19,4)
+    ToolTip = ("Should only be used when building a LiveCD not intended for installation!")
+    Text = ("Delete Boot Files")
+  }
+  { ResolutionBox ComboBox
+    MoveScaled(26,36,19,4)
+    ToolTip = ("Change the resolution used by virtual desktop")
+    ReadOnly = True
+    List = [("1920x1200"), ("1920x1080"), ("1600x1200"), ("1600x900"), ("1280x1024"), ("1280x960"), ("1280x800"), ("1280x768"), ("1024x768"), ("800x600"), ("640x480")]
+  }
+  { Label2 Label
+    MoveScaled(1,36,23,4)
+    Text = ("Virtual Desktop Resolution")
+    Alignment = Align.Left
+  }
+  { VirtualMemBox ComboBox
+    MoveScaled(26,41,19,4)
+    ToolTip = ("Set the amount of virtual memory used by desktop emulator")
+    ReadOnly = True
+    List = [("64"), ("96"), ("128"), ("256"), ("384"), ("512"), ("768"), ("1024"), ("2048")]
+  }
+  { Label1 Label
+    MoveScaled(1,41,23,4)
+    Text = ("Desktop Emulator Memory")
+    Alignment = Align.Left
+  }
+  { WorkDir TextBox
+    MoveScaled(1,4,29,4)
+    ReadOnly = True
+  }
+  { Change_WDir Button
+    MoveScaled(32,4,13,4)
+    ToolTip = ("Change the working directory")
+    Text = ("Change")
+    Picture = Picture["icon:/16/directory"]
+  }
+  { Label4 Label
+    MoveScaled(1,1,43,4)
+    #Translate = False
+    Text = "Working Directory"
+    Alignment = Align.Left
+    Transparent = True
+  }
+  { Label5 Label
+    MoveScaled(1,46,18,4)
+    Text = ("Compression Format")
+    Alignment = Align.Left
+  }
+  { CompressionBox ComboBox
+    MoveScaled(26,46,19,4)
+    ToolTip = ("Choose compression format for root FileSystem")
+    ReadOnly = True
+    List = [("gzip"), ("lzo"), ("xz")]
+  }
+  { ForceChroot CheckBox
+    MoveScaled(1,19,27,4)
+    ToolTip = ("Skip FileSystem lock check")
+    Text = ("Skip FileSystem Lock Check")
+  }
+  { UseColors CheckBox
+    MoveScaled(1,15,23,4)
+    ToolTip = ("Use color in messages")
+    Text = ("Use Color in Messages")
+  }
+  { AptHelper CheckBox
+    MoveScaled(1,23,17,4)
+    ToolTip = ("Update package database, install missing dependencies and remove unnecessary files")
+    Text = ("Use apt-helper")
+  }
+  { MountDir TextBox
+    MoveScaled(1,11,29,4)
+    ReadOnly = True
+  }
+  { Change_MDir Button
+    MoveScaled(32,11,13,4)
+    ToolTip = ("Change the working directory")
+    Text = ("Change")
+    Picture = Picture["icon:/16/directory"]
+  }
+  { Label6 Label
+    MoveScaled(1,8,43,4)
+    Text = ("ISO Mount Directory")
+    Alignment = Align.Left
+  }
+  { LocalesBox ComboBox
+    MoveScaled(26,31,19,4)
+    ToolTip = ("Choose desired locale")
+    ReadOnly = True
+  }
+  { Label3 Label
+    MoveScaled(1,31,7,4)
+    Text = ("Locale")
+    Alignment = Align.Left
+  }
+}

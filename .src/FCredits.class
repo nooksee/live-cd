@@ -1,0 +1,11 @@
+' Gambas class file
+
+
+Public Sub Form_Open()
+  Me.Center
+  Me.Caption = "Credits"
+End
+
+Public Sub Quit_Click()
+  Me.Close
+End

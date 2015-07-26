@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+
+# LiveCD Creator 3
+# Copyright (C) 2012-2014  Kevin Atwood
+# 
+# Customizer - Advanced LiveCD Remastering Tool
+# Copyright (C) 2010-2013  Ivailo Monev
+# 
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+## ArchiveCD.sh Script whipped up for LinuxJournal.com Blog
+## Post on Archiving CD's to ISO Images.  Written by Jayson
+## Broughton.  Script updates may be found at the following
+## website: www.jaysonbroughton.com
+
+set -u
+source /etc/live-cd/common
+source /etc/live-cd/default
+
+#################### Some functions used when error occurs #####################
+
+__create_work_dir__() {
+	INFO_MESSAGE "Creating work directory"
+	mkdir -p "$WORK_DIR/ISOFILE" || ERROR_MESSAGE "Unable to create work directory!"
+}
+
+__purge_work_dir__() {
+    EXTRA_INFO_MESSAGE "Purging" "$WORK_DIR/ISOFILE"
+	rm -rf "$WORK_DIR/ISOFILE" || ERROR_MESSAGE "Unable to purge ISOFILE directory"
+}
+
+################## Cleaning up previous temp folder if it exists ###############
+
+if [ -d "$WORK_DIR/ISOFILE" ];then
+    __purge_work_dir__
+    __create_work_dir__
+else
+	__create_work_dir__
+fi
+
+######################### Disk volume label ####################################
+
+INFO_MESSAGE "Retrieving disk volume label"
+dd if=/dev/cdrom bs=1 skip=32808 count=32 || ERROR_MESSAGE "Failed to read /dev/cdrom: No medium found!"
+
+######################### Extraction image file ################################
+
+INFO_MESSAGE "Extracting image file"
+dd if=/dev/cdrom | pv | dd of="$WORK_DIR/ISOFILE/cdimage.iso" || ERROR_MESSAGE "Unable to extract image file!"
+
+####################### Checking if the image file exists ######################
+
+if [ ! -e "$WORK_DIR/ISOFILE/cdimage.iso" ];then
+	ERROR_MESSAGE "The image file does not exist!"
+fi
+
+######################### Check MD5Sum #########################################
+
+INFO_MESSAGE "Checking MD5Sum of disk and image file"
+md5cd=`dd if=/dev/cdrom | md5sum` >&2
+md5iso=`cat "$WORK_DIR/ISOFILE/cdimage.iso" | md5sum` >&2
+
+################## Print MD5 info ##############################################
+
+EXTRA_INFO_MESSAGE "Disk MD5 is:" "$md5cd"
+EXTRA_INFO_MESSAGE "Image file MD5 is:" "$md5iso"
+EXTRA_INFO_MESSAGE "Image file successfully extracted to:" "$WORK_DIR/ISOFILE/cdimage.iso"
+
+################# Creating md5sum and ISO  #################
+cd "$WORK_DIR/ISOFILE"
+INFO_MESSAGE "Creating MD5Sum"
+find . -type f \! -name 'md5sum.txt' -exec md5sum '{}' + > md5sum.txt || ERROR_MESSAGE "Unable to create the MD5Sum!"
+chmod 555 "$WORK_DIR/ISOFILE/cdimage.iso"

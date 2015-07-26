@@ -1,0 +1,287 @@
+' Gambas module file
+
+Public WorkDir As String = Func.Get_Str("/etc/live-cd/default", "WORK_DIR=", "/home")
+
+Public Function Get_Str(SrchFile As String, SrchStr As String, Def As String) As Variant
+Dim content_array As String[]
+  Dim sLine, content As String
+  Dim counter As Integer
+
+  Print "\n===================== Get_Str() begin ====================="
+  Func.Debug_Msg("SrchFile: " & SrchFile)
+  Func.Debug_Msg("SrchStr: " & SrchStr)
+  Func.Debug_Msg("Def: " & Def)
+  
+  content = Func.Load_File(SrchFile)
+  content_array = Split(content, "\n")
+  
+  counter = 0
+  For Each sLine In content_array
+    If sLine Like SrchStr & "*" Then
+      sLine = Replace$(sLine, SrchStr, "")
+      Break
+    Endif
+    counter += 1
+  Next
+  
+  If counter = content_array.Count Then
+    Func.Save_File(SrchFile, content & "\n" & SrchStr & Quote(Def))
+    Return UnQuote(Def)
+    Print "================ Get_Str() end (appending) ================\n"
+  Else
+    Print "================== Get_Str() end (found) ==================\n"
+    Return UnQuote(sLine)
+  Endif
+End
+
+Public Function Replace_Str(SrchFile As String, SrchStr As String, RpcStr As String)
+  Dim content_array As String[]
+  Dim sLine, content As String
+  Dim counter As Integer
+  
+  Print "\n=================== Replace_Str() begin ==================="
+  Func.Debug_Msg("SrchFile: " & SrchFile)
+  Func.Debug_Msg("SrchStr: " & SrchStr)
+  Func.Debug_Msg("RpcStr: " & RpcStr)
+  
+  content = Func.Load_File(SrchFile)
+  content_array = Split(content, "\n")
+  
+  counter = 0
+  For Each sLine In content_array
+    If sLine Like SrchStr & "*" Then
+      Func.Save_File(SrchFile, Replace$(content, sLine, SrchStr & Quote(RpcStr)))
+      Print "================ Replace_Str() end (found) ================\n"
+      Break
+    Endif
+    counter += 1
+  Next
+  
+  If counter = content_array.Count Then
+    Func.Save_File(SrchFile, content & "\n" & SrchStr & Quote(RpcStr))
+    Print "============== Replace_Str() end (appending) ==============\n"
+  Endif
+End
+
+Public Function Replace_Str_AsIs(SrchFile As String, SrchStr As String, RpcStr As String)
+  Dim content_array As String[]
+  Dim sLine, content As String
+  Dim counter As Integer
+  
+  Print "\n=============== Replace_Str_AsIs() begin ================"
+  Func.Debug_Msg("SrchFile: " & SrchFile)
+  Func.Debug_Msg("SrchStr: " & SrchStr)
+  Func.Debug_Msg("RpcStr: " & RpcStr)
+  
+  content = Func.Load_File(SrchFile)
+  content_array = Split(content, "\n")
+  
+  counter = 0
+  For Each sLine In content_array
+    If sLine Like SrchStr & "*" Then
+      Func.Save_File(SrchFile, Replace$(content, sLine, SrchStr & RpcStr))
+      Print "============= Replace_Str_AsIs() end (found) ==============\n"
+      Break
+    Endif
+    counter += 1
+  Next
+  
+  If counter = content_array.Count Then
+    Func.Save_File(SrchFile, content & "\n" & SrchStr & RpcStr)
+    Print "=========== Replace_Str_AsIs() end (appending) ============\n"
+  Endif
+End
+
+
+Public Function Edit_File(EditFile As String)
+  Dim Editor As String
+
+  Func.Event_Msg("Searching for text editor")
+  If Exist("/usr/bin/gedit") Then
+    Editor = "/usr/bin/gedit"
+  Else If Exist("/usr/bin/pluma") Then
+    Editor = "/usr/bin/pluma"
+  Else If Exist("/usr/bin/kate") Then
+    Editor = "/usr/bin/kate"
+  Else If Exist("/usr/bin/kwrite") Then
+    Editor = "/usr/bin/kwrite"
+  Else If Exist("/usr/bin/medit") Then
+    Editor = "/usr/bin/medit"
+  Else If Exist("/usr/bin/nedit") Then
+    Editor = "/usr/bin/nedit"
+  Else If Exist("/usr/bin/mousepad") Then
+    Editor = "/usr/bin/mousepad"
+  Else If Exist("/usr/bin/leafpad") Then
+    Editor = "/usr/bin/leafpad"
+  Else If Exist("/usr/bin/geany") Then
+    Editor = "/usr/bin/geany"
+  Else If Exist("/usr/bin/emacs") Then
+    Editor = "/usr/bin/emacs"
+  Else If Exist("/usr/bin/bluefish") Then
+    Editor = "/usr/bin/bluefish"
+  Else If Exist("/usr/bin/ultraedit") Then
+    Editor = "/usr/bin/ultraedit"
+  Else If Exist("/usr/bin/scite") Then
+    Editor = "/usr/bin/scite"
+  Else If Exist("/usr/bin/vim") Then
+    Editor = "/usr/bin/vim"
+  Else If Exist("/usr/bin/vi") Then
+    Editor = "/usr/bin/vi"
+  Else If Exist("/usr/bin/nano") Then
+    Editor = "/usr/bin/nano"
+  Else If Exist("/usr/bin/pico") Then
+    Editor = "/usr/bin/pico"
+  Else
+    Message.Error("Unable to detect text editor!")
+  Endif
+
+  Func.Debug_Msg("Editing file: " & EditFile)
+
+  If Editor = "nano" Or Editor = "pico" Or Editor = "vi" Or Editor = "vim" Then
+    Exec [Func.Use_Term(), "-e", Editor, WorkDir & EditFile] Wait
+  Else
+    Exec [Editor, WorkDir & EditFile]
+  Endif
+  
+  Catch
+    Message.Error("Unable to edit\n\nFile: " & EditFile & "\nwith text editor: " & Editor)
+End
+
+Public Function Browse_Dir(BrsDir As String)
+  Func.Event_Msg("Browsing directory: " & BrsDir)
+
+  If Not Exist(WorkDir & BrsDir) Then
+    Message.Error("This directory, does not exist!")
+  Else If Exist("/usr/bin/nautilus") Then
+    Exec ["/usr/bin/nautilus", WorkDir & BrsDir]
+  Else If Exist("/usr/bin/caja") Then
+    Exec ["/usr/bin/caja", WorkDir & BrsDir]
+  Else If Exist("/usr/bin/dolphin") Then
+    Exec ["/usr/bin/dolphin", WorkDir & BrsDir]
+  Else If Exist("/usr/bin/pcmanfm") Then
+    Exec ["/usr/bin/pcmanfm", WorkDir & BrsDir]
+  Else If Exist("/usr/bin/xfe") Then
+    Exec ["/usr/bin/xfe", WorkDir & BrsDir]
+  Else If Exist("/usr/bin/worker") Then
+    Exec ["/usr/bin/worker", WorkDir & BrsDir]
+  Else If Exist("/usr/bin/gentoo") Then
+    Exec ["/usr/bin/gentoo", WorkDir & BrsDir]
+  Else If Exist("/usr/bin/thunar") Then
+    Exec ["/usr/bin/thunar", WorkDir & BrsDir]
+  Else If Exist("/usr/bin/filerunner") Then
+    Exec ["/usr/bin/filerunner", WorkDir & BrsDir]
+  Else If Exist("/usr/bin/krusader") Then
+    Exec ["/usr/bin/krusader", WorkDir & BrsDir]
+  Else If Exist("/usr/bin/rox-filer") Then
+    Exec ["/usr/bin/rox-filer", WorkDir & BrsDir]
+  Else
+    Message.Warning("No supported file manager was detected! \nSupported are: \n\nNautilus, Dolphin, PCManFM, Thunar, XFE, Worker, Gentoo, FileRunner, Krusader and ROX-Filer")
+  Endif
+End
+
+Public Function Use_Term() As String
+  Func.Event_Msg("Searching for terminal emulator")
+  If Exist("/usr/bin/gnome-terminal") Then
+    Return "/usr/bin/gnome-terminal"
+  Else If Exist("/usr/bin/mate-terminal") Then
+    Return "/usr/bin/mate-terminal"
+  Else If Exist("/usr/bin/konsole") Then
+    Return "/usr/bin/konsole"
+  Else If Exist("/usr/bin/xfce4-terminal") Then
+    Return "/usr/bin/xfce4-terminal"
+  Else If Exist("/usr/bin/terminal") Then
+    Return "/usr/bin/terminal"
+  Else If Exist("/usr/bin/lxterminal") Then
+    Return "/usr/bin/lxterminal"
+  Else If Exist("/usr/bin/terminator") Then
+    Return "/usr/bin/terminator"
+  Else If Exist("/usr/bin/sakura") Then
+    Return "/usr/bin/sakura"
+  Else If Exist("/usr/bin/yakuake") Then
+    Return "/usr/bin/yakuake"
+  Else If Exist("/usr/bin/urxterm") Then
+    Return "/usr/bin/urxterm"
+  Else If Exist("/usr/bin/aterm") Then
+    Return "/usr/bin/aterm"
+  Else If Exist("/usr/bin/Eterm") Then
+    Return "/usr/bin/Eterm"
+  Else If Exist("/usr/bin/xterm") Then
+    Return "/usr/bin/xterm"
+  Else
+    Message.Error("Unable to detect terminal emulator! \nSupported are: \n\nGnome-terminal, Konsole, XFCE4-terminal, LXTerminal, Terminator, Sakura, Yakuake, urxterm, Eterm, xterm and aterm")
+  Endif
+End
+
+Public Function Enable_Stuff()
+  Func.Event_Msg("Enabling widgets")
+  
+  FMain.Edit_Sources.Enabled = True
+  FMain.Install_DEB.Enabled = True
+  FMain.Terminal.Enabled = True
+  FMain.Build_ISO.Enabled = True
+  FMain.Clean.Enabled = True
+  FMain.Extras_Menu.Enabled = True
+  FMain.Directories.Enabled = True
+  FMain.Files.Enabled = True
+  FMain.Archive.Enabled = True
+  FMain.DistName.Enabled = True
+  FMain.HostName.Enabled = True
+  FMain.LiveCD_User.Enabled = True
+  FMain.Version.Enabled = True
+  FMain.ReleaseNotesURL.Enabled = True
+End
+
+Public Function Disable_Stuff()
+  Func.Event_Msg("Disabling widgets")
+
+  FMain.Edit_Sources.Enabled = False
+  FMain.Install_DEB.Enabled = False
+  FMain.Archive.Enabled = False
+  FMain.Terminal.Enabled = False
+  FMain.Build_ISO.Enabled = False
+  FMain.Clean.Enabled = False
+  FMain.Extras_Menu.Enabled = False
+  FMain.Directories.Enabled = False
+  FMain.Files.Enabled = False
+  FMain.Desktop.Enabled = False
+  FMain.DistName.Enabled = False
+  FMain.HostName.Enabled = False
+  FMain.LiveCD_User.Enabled = False
+  FMain.Version.Enabled = False
+  FMain.ReleaseNotesURL.Enabled = False
+End
+
+Public Function Load_File(lFile As String) As Variant
+  Func.Debug_Msg("Loading file: " & lFile)
+  If Exist(lFile) Then
+    If Access(lFile, gb.Read) Then
+      Return File.Load(lFile)
+    Else
+      Message.Error(lFile & " is not readable!")
+    Endif
+  Else
+    Message.Error(lFile & " does not exist!")
+  Endif
+End
+
+Public Function Save_File(sFile As String, Cont As String)
+Func.Debug_Msg("Saving file: " & sFile)
+  If Exist(sFile) Then
+    If Access(sFile, gb.Write) Then
+        File.Save(sFile, Cont)
+    Else
+      Message.Error(sFile & " is not writable!")
+    Endif
+  Else
+    Message.Error(sFile & " does not exist!")
+  Endif
+End
+
+Public Function Event_Msg(Msg As String)
+  Print "[EVENT] " & Msg
+End
+
+
+Public Function Debug_Msg(Msg As String)
+  Print "[DEBUG] " & Msg
+End

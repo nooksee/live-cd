@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+
+# LiveCD Creator 3
+# Copyright (C) 2012-2014  Kevin Atwood
+# 
+# Customizer - Advanced LiveCD Remastering Tool
+# Copyright (C) 2010-2013  Ivailo Monev
+# 
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+set -u
+source /etc/live-cd/common
+source /etc/live-cd/default
+
+# __check_for_X__
+__check_fs_dir__
+__check_lock__
+__update_distro_name__
+__check_sources_list__
+
+AVAILABLE=`(ls "$WORK_DIR/FileSystem/usr/share/xsessions" | wc -l) 2> /dev/null`
+case $AVAILABLE in
+	0) ERROR_MESSAGE "No x-session available!" ;;
+	1) choise="`ls -F "$WORK_DIR/FileSystem/usr/share/xsessions" | sed 's/\.desktop//'`"
+	   EXTRA_WARNING_MESSAGE "There is only one x-session available" "$choise" ;;
+	*) WARNING_MESSAGE "Multiple x-sessions available, choose which one to execute:"
+	
+	while true;do
+	echo
+	for i in `ls "$WORK_DIR/FileSystem/usr/share/xsessions" | sed 's/.desktop//'`;do
+		echo -e "$i"
+	done
+	
+	echo
+	QUESTION_MESSAGE "Which shall it be?"
+	read choise
+	
+	if [ ! -e "$WORK_DIR/FileSystem/usr/share/xsessions/$choise.desktop" ];then
+		WARNING_MESSAGE "This is not an option!"	
+	else
+		break
+	fi
+	done ;;
+esac
+
+EXEC_COMMAND="`grep -m 1 'Exec=' "$WORK_DIR/FileSystem/usr/share/xsessions/$choise.desktop" | sed 's/Exec=//'`"
+# FIXME: error not shown when unable to execute virtual desktop
+# (Xephyr -ac -screen $RESOLUTION -br :9 &) || error
+INFO_MESSAGE "Starting virtual desktop"
+Xephyr -wr -ac -screen $RESOLUTION :9 &
+
+__allow_local_X_access__
+__mount_sys__
+__mount_dbus__
+__chroot__ apt-get install dbus -y -f
+__chroot__ dbus-uuidgen --ensure
+__chroot__ env DISPLAY=localhost:9 $EXEC_COMMAND
+__umount_sys__
+__recursive_umount__
+__block_local_X_access__
+
+INFO_MESSAGE "Stopping virtual desktop"
+killall Xephyr
+
+INFO_MESSAGE "Removing some unwanted directories and files"
+rm -rf "$WORK_DIR/FileSystem/root/.kde/share/apps/nepomuk"
+rm -rf "$WORK_DIR/FileSystem/root/.cache"
+rm -rf "$WORK_DIR/FileSystem/root/.dbus"
+rm -rf "$WORK_DIR/FileSystem/root/.thumbnails"
+
+rm -rf "$WORK_DIR/FileSystem/root/.aptitude"
+rm -rf "$WORK_DIR/FileSystem/root/.cups"
+rm -rf "$WORK_DIR/FileSystem/root/.adobe"
+rm -rf "$WORK_DIR/FileSystem/root/.gvfs"
+rm -rf "$WORK_DIR/FileSystem/root/.local/share/gvfs-metadata"
+
+INFO_MESSAGE "Copying changes to default user directory"
+cp -ru "$WORK_DIR/FileSystem/root/"* "$WORK_DIR/FileSystem/etc/skel" 2> /dev/null
+cp -ru "$WORK_DIR/FileSystem/root/".??* "$WORK_DIR/FileSystem/etc/skel" 2> /dev/null
+if [ "$WORK_DIR/FileSystem/usr/share/xsessions/$choise.desktop" = "$WORK_DIR/FileSystem/usr/share/xsessions/ubuntu.desktop" ];then
+    sed -i 's/profile = Default/profile = unity/g' $WORK_DIR/FileSystem/root/.config/compiz-1/compizconfig/config
+fi
+
+
+INFO_MESSAGE "Adjusting path to /home directory"
+LIVEUSERNAME=`grep "export USERNAME=" "$WORK_DIR/FileSystem/etc/casper.conf" | sed 's/export USERNAME=//;s/\"//g'` || ERROR_MESSAGE "Unable to get user name"
+find "$WORK_DIR/FileSystem/etc/skel" -type f -exec sed -i "s@/home/root/@/home/$LIVEUSERNAME@g" {} + || WARNING_MESSAGE "Unable to adjust home path"
+
+INFO_MESSAGE "Adjusting display entries"
+find "$WORK_DIR/FileSystem/etc/skel" -type f -exec sed -i "s@localhost:9.0@:0.0@g" {} + || WARNING_MESSAGE "Unable to adjust display entries"

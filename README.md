@@ -22,23 +22,9 @@ An advanced Live CD customization and remastering tool. With it, you can build o
 
 This is Gambas3 branch of LiveCD Creator, for Ubuntu 14.04.
 
-## Getting Started
-
-## Download installation script and execute:
-wget https://dl.dropboxusercontent.com/u/54183088/install.sh
-chmod +x install.sh
-./install.sh -b gambas3 -i
-
-## Then, run Customizer in CLI:
-sudo /opt/Customizer/CLI.sh -h
-
-## Or, run Customizer in GUI:
-gksu /opt/Customizer/GUI.gambas
-
-Visit our GitHub Wiki at  https://github.com/clearkimura/Customizer/wiki  for details.
-
-
 ## Credits
+
+Kevin Atwood 'nooksee' (code developer) `admin@nooksee.com`
 
 Ivailo Monev 'SmiL3y' (code developer) `xakepa10@gmail.com`
 

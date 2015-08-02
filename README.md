@@ -18,7 +18,7 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
-An advanced Live CD customization and remastering tool. With it, you can build own Ubuntu-based remix using Ubuntu Mini Remix, Ubuntu or its derivatives ISO image with a few mouse clicks.
+An advanced LiveCD customization and remastering tool. With it, you can build your own Ubuntu based remix using Ubuntu Mini Remix, Ubuntu or its derivatives from an ISO image.
 
 This is Gambas3 branch of LiveCD Creator, for Ubuntu 14.04.
 

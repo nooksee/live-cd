@@ -22,6 +22,9 @@ An advanced LiveCD customization and remastering tool. With it, you can build yo
 
 This is Gambas3 branch of LiveCD Creator, for Ubuntu 14.04.
 
+A Python port (GTK3/PyGObject GUI + Python backend, functionally
+equivalent to this Gambas3/Bash version) is available in [`python/`](python/).
+
 ## Credits
 
 Kevin Atwood 'nooksee' (code developer) `admin@nooksee.com`

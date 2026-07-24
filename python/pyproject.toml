@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "livecd-creator"
+version = "3.13.57"
+description = "LiveCD Creator 3 - advanced LiveCD customization and remastering tool (Python port)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "GPL-2.0-or-later" }
+authors = [
+    { name = "Kevin Atwood" },
+    { name = "Ivailo Monev" },
+]
+
+[project.optional-dependencies]
+gui = ["PyGObject"]
+
+[project.scripts]
+live-cd = "livecd.cli:main"
+
+[project.gui-scripts]
+live-cd-gui = "livecd.gui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["livecd", "livecd.*"]

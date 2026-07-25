@@ -4,18 +4,28 @@ Written at the end of the porting session, for whoever picks this up next
 (human or assistant). It covers what was built, what was actually verified,
 where the bodies are buried, and what to do first.
 
+**2026-07-25 update:** the original Gambas3 GUI (`.src/`) and Bash backend
+(`.hidden/`) that this was ported from have been retired from this
+repository at Kevin's request and archived, verified byte-identical, to
+`/media/nos4r2/hard_vol2/LiveCD-Original-2015-Archive/` (git commit
+`edfcc62`). Full git history is intact — `git log` / `git show` against
+commits before `edfcc62` still show the original tree. This is now the only
+implementation in the repository; the `python/` prefix used throughout the
+rest of this document has been flattened away, and paths below are relative
+to the repo root.
+
 ---
 
 ## 1. State in one paragraph
 
-Every Bash script in `.hidden/` and every Gambas form in `.src/` has a Python
-counterpart under `python/`. All 35 modules byte-compile. The CLI's argument
-handling and the GUI's window construction were both exercised and behave
-correctly. **No ISO has ever been remastered with this code.** The environment
-it was written in had no Ubuntu ISO, no loop-mount capability, and no
-`mksquashfs`/`genisoimage`. So the backend is a carefully reviewed
-translation, not a proven one. Treat the first real remastering run as the
-actual acceptance test.
+Every Bash script that used to live in `.hidden/` and every Gambas form that
+used to live in `.src/` has a Python counterpart under `livecd/`. All 35
+modules byte-compile. The CLI's argument handling and the GUI's window
+construction were both exercised and behave correctly. **No ISO has ever been
+remastered with this code.** The environment it was written in had no Ubuntu
+ISO, no loop-mount capability, and no `mksquashfs`/`genisoimage`. So the
+backend is a carefully reviewed translation, not a proven one. Treat the first
+real remastering run as the actual acceptance test.
 
 ---
 
@@ -30,11 +40,11 @@ sudo apt-get install squashfs-tools rsync genisoimage qemu-system-x86 \
                      xserver-xephyr imagemagick pv
 
 # Run in place, no install needed
-python/bin/live-cd --help
-python/bin/live-cd-gui
+bin/live-cd --help
+bin/live-cd-gui
 
 # Or install properly
-pip install -e ./python[gui]
+pip install -e .[gui]
 ```
 
 `python3-gi` and the GTK typelib must be visible to the *same* interpreter.
@@ -49,7 +59,7 @@ system interpreter or symlink the bindings in.
 Everything is a direct 1:1 translation. If you're wondering "where did X go",
 it's here.
 
-### Backend — `.hidden/scripts/*` → `python/livecd/backend/*`
+### Backend — formerly `.hidden/scripts/*` → `livecd/backend/*`
 
 | Original script | Port | Notes |
 | --- | --- | --- |
@@ -76,7 +86,7 @@ it's here.
 `.hidden/live-cd.sh` → `cli.py` + `bin/live-cd`. Same flags, same multi-flag
 looping, same `su` elevation via `Root_it` → `root_it()`.
 
-### GUI — `.src/F*.class` + `.form` → `python/livecd/gui/*`
+### GUI — formerly `.src/F*.class` + `.form` → `livecd/gui/*`
 
 | Gambas form | Port |
 | --- | --- |
@@ -289,7 +299,7 @@ echo 'http://example.com/notes' > /tmp/lcd/work/ISO/.disk/release_notes_url
 printf 'WORK_DIR=/tmp/lcd/work\nMOUNT_DIR=/mnt\nMESSAGES_COLORS=1\n' \
   | sudo tee /etc/live-cd/default
 
-cd python && sudo -E python3 -c "
+sudo -E python3 -c "
 import sys; sys.path.insert(0,'.')
 from livecd.gui.gtkcompat import Gtk
 from livecd.gui.main_window import MainWindow
@@ -339,5 +349,5 @@ comparison.
 - **The Ubuntu URLs in `downloader_window.py` are dead** — they point at
   14.04 and a 12.04 mini-remix. Faithful to the original, useless in practice.
   Worth repointing at current releases or fetching an index.
-- **`python/README.md`** is the user-facing doc; this file is the
+- **`README.md`** is the user-facing doc; this file is the
   contributor-facing one. Keep them from drifting.

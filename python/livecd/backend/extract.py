@@ -9,8 +9,14 @@ from . import mounts, chroot, run
 from .. import messages
 
 
-def _clean(ctx):
-    subprocess.run(["umount", "-fl", ctx.mount_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def _clean(ctx, mount_point=None):
+    """Unmount and purge. The original bash reassigns MOUNT_DIR to the mktemp
+    directory, so every __clean__ after that point unmounts the temp mount
+    rather than its parent -- pass mount_point to get that behaviour."""
+    target = mount_point or ctx.mount_dir
+    subprocess.run(["umount", "-fl", target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if mount_point is not None:
+        shutil.rmtree(mount_point, ignore_errors=True)
     mounts.purge_work_dirs(ctx)
 
 
@@ -37,7 +43,7 @@ def run_extract(ctx):
     ok = ok and os.path.exists(os.path.join(mount_point, "casper/filesystem.squashfs"))
     if not ok:
         messages.error_no_exit("This is not a usable image file!")
-        _clean(ctx)
+        _clean(ctx, mount_point)
         raise messages.LiveCDError("not a usable image file")
 
     messages.info("Extracting FileSystem")
@@ -52,7 +58,7 @@ def run_extract(ctx):
     machine = subprocess.run(["uname", "-m"], stdout=subprocess.PIPE, text=True).stdout.strip()
     if arch == "amd64" and machine != "x86_64":
         messages.error_no_exit("The image file's architecture is amd64, yours is not!")
-        _clean(ctx)
+        _clean(ctx, mount_point)
         raise messages.LiveCDError("architecture mismatch")
 
     messages.info("Copying extracted files")

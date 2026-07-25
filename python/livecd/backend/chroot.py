@@ -111,7 +111,9 @@ def chroot_run(ctx, *args):
             continue
         if not os.path.exists(blocked):
             os.rename(target, blocked)
-            in_chroot_path = target[target.find("FileSystem") + len("FileSystem"):]
+            # Mirrors bash's ${f##*FileSystem}, which strips through the LAST
+            # occurrence -- important when work_dir itself contains "FileSystem".
+            in_chroot_path = target[target.rfind("FileSystem") + len("FileSystem"):]
             run(["chroot", ctx.fs_dir] + chroot_env + ["ln", "-s", "/bin/true", in_chroot_path])
         else:
             messages.warning(f"Blocking of {target} skipped!")

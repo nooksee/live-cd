@@ -75,7 +75,7 @@ def _replace(path, key, encoded_value):
 
 
 def ensure_config_exists():
-    """Port of Check.Conf_File: create /etc/live-cd/default with defaults if missing."""
+    """Port of Check.Conf_File: create /etc/live-usb/default with defaults if missing."""
     messages.event_msg("Checking configuration file")
     if not os.path.exists(constants.CONFIG_FILE):
         messages.warning(
@@ -112,7 +112,8 @@ def get_mount_dir():
 
 def load_env():
     """Load every setting from the config file into a plain dict, mirroring
-    what `source /etc/live-cd/default` gave the bash scripts."""
+    what `source /etc/live-cd/default` gave the original bash scripts (now
+    `/etc/live-usb/default`)."""
     ensure_config_exists()
     keys = {
         "WORK_DIR": constants.DEFAULT_WORK_DIR,

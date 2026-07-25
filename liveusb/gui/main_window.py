@@ -1,4 +1,4 @@
-"""Port of FMain.class / FMain.form: the main LiveCD Creator window."""
+"""Port of FMain.class / FMain.form: the main LiveUSB Creator window."""
 
 import os
 import subprocess
@@ -25,7 +25,7 @@ class MainWindow:
         self._on_close = on_close
         self.work_dir = config.get_work_dir()
 
-        self.window = Gtk.Window(title="LiveCD Creator")
+        self.window = Gtk.Window(title="LiveUSB Creator")
         self.window.set_border_width(6)
         self.window.set_resizable(False)
         self.window.connect("destroy", self._on_destroy)
@@ -195,7 +195,7 @@ class MainWindow:
         frame.add(grid)
 
         self.distname_entry = Gtk.Entry(max_length=16, sensitive=False)
-        self.livecd_user_entry = Gtk.Entry(max_length=16, sensitive=False)
+        self.liveusb_user_entry = Gtk.Entry(max_length=16, sensitive=False)
         self.hostname_entry = Gtk.Entry(max_length=16, sensitive=False)
         self.version_entry = Gtk.Entry(sensitive=False)
         self.releasenotesurl_entry = Gtk.Entry(sensitive=False)
@@ -203,7 +203,7 @@ class MainWindow:
         grid.attach(Gtk.Label(label="Name", xalign=0), 0, 0, 1, 1)
         grid.attach(self.distname_entry, 0, 1, 1, 1)
         grid.attach(Gtk.Label(label="User", xalign=0), 1, 0, 1, 1)
-        grid.attach(self.livecd_user_entry, 1, 1, 1, 1)
+        grid.attach(self.liveusb_user_entry, 1, 1, 1, 1)
         grid.attach(Gtk.Label(label="Host", xalign=0), 0, 2, 1, 1)
         grid.attach(self.hostname_entry, 0, 3, 1, 1)
         grid.attach(Gtk.Label(label="Version", xalign=0), 1, 2, 1, 1)
@@ -213,7 +213,7 @@ class MainWindow:
 
         self.distname_entry.connect("changed", self.on_distname_change)
         self.hostname_entry.connect("changed", self.on_hostname_change)
-        self.livecd_user_entry.connect("changed", self.on_livecd_user_change)
+        self.liveusb_user_entry.connect("changed", self.on_liveusb_user_change)
         self.version_entry.connect("changed", self.on_version_change)
         self.releasenotesurl_entry.connect("changed", self.on_releasenotesurl_change)
 
@@ -239,7 +239,7 @@ class MainWindow:
         for widget in (
             self.edit_sources_btn, self.install_deb_btn, self.terminal_btn,
             self.build_iso_btn, self.clean_btn, self.archive_btn,
-            self.distname_entry, self.hostname_entry, self.livecd_user_entry,
+            self.distname_entry, self.hostname_entry, self.liveusb_user_entry,
             self.version_entry, self.releasenotesurl_entry,
         ):
             widget.set_sensitive(True)
@@ -252,7 +252,7 @@ class MainWindow:
             self.edit_sources_btn, self.install_deb_btn, self.archive_btn,
             self.terminal_btn, self.build_iso_btn, self.clean_btn,
             self.desktop_btn, self.distname_entry, self.hostname_entry,
-            self.livecd_user_entry, self.version_entry, self.releasenotesurl_entry,
+            self.liveusb_user_entry, self.version_entry, self.releasenotesurl_entry,
         ):
             widget.set_sensitive(False)
         for widget in (self.extras_menu_item, self.directories_menu_item, self.files_menu_item):
@@ -303,7 +303,7 @@ class MainWindow:
         lsb_release = os.path.join(self.work_dir, "FileSystem/etc/lsb-release")
 
         self.hostname_entry.set_text(config.get_str(casper_conf, "export HOST=", "host"))
-        self.livecd_user_entry.set_text(config.get_str(casper_conf, "export USERNAME=", "live"))
+        self.liveusb_user_entry.set_text(config.get_str(casper_conf, "export USERNAME=", "live"))
         self.version_entry.set_text(config.get_str(lsb_release, "DISTRIB_RELEASE=", "13.10"))
         self.distname_entry.set_text(config.get_str(lsb_release, "DISTRIB_ID=", "Custom"))
 
@@ -359,13 +359,13 @@ class MainWindow:
     # -- Form_Open / Form_Close ------------------------------------------------
 
     def _form_open(self):
-        messages.event_msg("Checking if LiveCD Creator is locked")
+        messages.event_msg("Checking if LiveUSB Creator is locked")
         if os.path.exists(constants.GUI_LOCK_FILE):
-            self._show_warning("Another instance of LiveCD Creator is already running!")
+            self._show_warning("Another instance of LiveUSB Creator is already running!")
             self.window.destroy()
             return
 
-        messages.event_msg("Locking LiveCD Creator")
+        messages.event_msg("Locking LiveUSB Creator")
         try:
             fsutil.save_file(constants.GUI_LOCK_FILE, "")
         except OSError:
@@ -408,7 +408,7 @@ class MainWindow:
 
     def on_build_iso(self, _widget):
         fields = [
-            self.distname_entry, self.hostname_entry, self.livecd_user_entry,
+            self.distname_entry, self.hostname_entry, self.liveusb_user_entry,
             self.version_entry, self.releasenotesurl_entry,
         ]
         if any(field.get_text() == "" for field in fields):
@@ -458,9 +458,9 @@ class MainWindow:
         config.replace_str(os.path.join(self.work_dir, "FileSystem/etc/casper.conf"), "export HOST=", value)
         config.replace_str(os.path.join(self.work_dir, "FileSystem/etc/casper.conf"), "export FLAVOUR=", "custom")
 
-    def on_livecd_user_change(self, entry):
+    def on_liveusb_user_change(self, entry):
         value = entry.get_text().strip().lower()
-        messages.event_msg("LiveCD_User changed")
+        messages.event_msg("LiveUSB_User changed")
         config.replace_str(os.path.join(self.work_dir, "FileSystem/etc/casper.conf"), "export USERNAME=", value)
         config.replace_str(os.path.join(self.work_dir, "FileSystem/etc/casper.conf"), "export FLAVOUR=", "custom")
 

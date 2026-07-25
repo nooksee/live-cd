@@ -2,7 +2,7 @@
 
 Each recognised flag runs the equivalent of one of the original
 /etc/live-cd/scripts/* bash scripts. Multiple flags may be combined in a
-single invocation, e.g. `live-cd -e -r -q`, exactly like the original.
+single invocation, e.g. `live-usb -e -r -q`, exactly like the original.
 """
 
 import datetime
@@ -37,7 +37,7 @@ USAGE = """
 """
 
 VERSION_TEXT = f"""
-LiveCD Creator 3 ({__version__}) - Python port
+LiveUSB Creator 3 ({__version__}) - Python port
 
 Links:
 
@@ -106,7 +106,7 @@ def root_it(action):
 
     if os.geteuid() != 0:
         messages.warning("You are not root! Prompting for password!")
-        inner_argv = [sys.executable, "-m", "livecd.cli", f"--{action}"]
+        inner_argv = [sys.executable, "-m", "liveusb.cli", f"--{action}"]
         inner_cmd = " ".join(shlex.quote(part) for part in inner_argv)
         result = subprocess.run(["su", "-c", inner_cmd])
         if result.returncode != 0:
@@ -115,7 +115,7 @@ def root_it(action):
         ctx = Context.load()
         try:
             ACTIONS[action](ctx)
-        except messages.LiveCDError as exc:
+        except messages.LiveUSBError as exc:
             messages.warning(f"{label} failed: {exc}")
             sys.exit(2)
 
@@ -126,8 +126,9 @@ def root_it(action):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
 
-    # Mirrors live-cd.sh sourcing /etc/live-cd/{common,default} up front, so
-    # every message (including the very first one) respects MESSAGES_COLORS.
+    # Mirrors live-cd.sh sourcing /etc/{common,default} up front (now
+    # /etc/live-usb/{common,default}), so every message (including the very
+    # first one) respects MESSAGES_COLORS.
     config.ensure_config_exists()
     config.load_env()
 

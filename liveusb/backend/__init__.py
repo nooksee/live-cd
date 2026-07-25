@@ -11,7 +11,7 @@ from .. import messages
 @dataclass
 class Context:
     """Runtime settings, equivalent to the variables sourced from
-    /etc/live-cd/default by the original bash scripts."""
+    /etc/live-cd/default by the original bash scripts (now /etc/live-usb/default)."""
 
     work_dir: str
     mount_dir: str

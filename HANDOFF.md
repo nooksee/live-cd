@@ -7,19 +7,30 @@ where the bodies are buried, and what to do first.
 **2026-07-25 update:** the original Gambas3 GUI (`.src/`) and Bash backend
 (`.hidden/`) that this was ported from have been retired from this
 repository at Kevin's request and archived, verified byte-identical, to
-`/media/nos4r2/hard_vol2/LiveCD-Original-2015-Archive/` (git commit
-`edfcc62`). Full git history is intact — `git log` / `git show` against
-commits before `edfcc62` still show the original tree. This is now the only
-implementation in the repository; the `python/` prefix used throughout the
-rest of this document has been flattened away, and paths below are relative
-to the repo root.
+`/media/nos4r2/hard_vol2/LiveCD-Original-2015-Archive/`. Full git history is
+intact (the retirement was later folded into a `git-filter-repo` rewrite —
+see git log for the current commit that first excludes `.src`/`.hidden`).
+This is now the only implementation in the repository; the `python/` prefix
+used throughout the rest of this document has been flattened away, and
+paths below are relative to the repo root.
+
+**2026-07-25 update, same day:** the project itself was renamed from LiveCD
+Creator to **LiveUSB Creator** at Kevin's request — "it will be live-usb and
+LiveUSB for naming". The Python package is now `liveusb/` (was `livecd/`),
+the CLI/GUI commands are `live-usb`/`live-usb-gui` (were `live-cd`/
+`live-cd-gui`), and the on-disk config paths are `/etc/live-usb` and
+`/home/live-usb` (were `/etc/live-cd` and `/home/live-cd` — see §7, this is
+a real compatibility break with any existing `/etc/live-cd` install, not
+just cosmetic). Historical references to the literal old filenames
+(`.hidden/live-cd.sh`, etc.) are left as-is below since that's what the
+archived original was actually called.
 
 ---
 
 ## 1. State in one paragraph
 
 Every Bash script that used to live in `.hidden/` and every Gambas form that
-used to live in `.src/` has a Python counterpart under `livecd/`. All 35
+used to live in `.src/` has a Python counterpart under `liveusb/`. All 35
 modules byte-compile. The CLI's argument handling and the GUI's window
 construction were both exercised and behave correctly. **No ISO has ever been
 remastered with this code.** The environment it was written in had no Ubuntu
@@ -40,8 +51,8 @@ sudo apt-get install squashfs-tools rsync genisoimage qemu-system-x86 \
                      xserver-xephyr imagemagick pv
 
 # Run in place, no install needed
-bin/live-cd --help
-bin/live-cd-gui
+bin/live-usb --help
+bin/live-usb-gui
 
 # Or install properly
 pip install -e .[gui]
@@ -59,7 +70,7 @@ system interpreter or symlink the bindings in.
 Everything is a direct 1:1 translation. If you're wondering "where did X go",
 it's here.
 
-### Backend — formerly `.hidden/scripts/*` → `livecd/backend/*`
+### Backend — formerly `.hidden/scripts/*` → `liveusb/backend/*`
 
 | Original script | Port | Notes |
 | --- | --- | --- |
@@ -83,10 +94,10 @@ it's here.
 | `__chroot__`, `__update_distro_name__`, `__create_work_dirs__`, `__check_sources_list__` | `backend/chroot.py` |
 | `INFO_MESSAGE` / `WARNING_MESSAGE` / `ERROR_MESSAGE` family | `messages.py` |
 
-`.hidden/live-cd.sh` → `cli.py` + `bin/live-cd`. Same flags, same multi-flag
+`.hidden/live-cd.sh` → `cli.py` + `bin/live-usb`. Same flags, same multi-flag
 looping, same `su` elevation via `Root_it` → `root_it()`.
 
-### GUI — formerly `.src/F*.class` + `.form` → `livecd/gui/*`
+### GUI — formerly `.src/F*.class` + `.form` → `liveusb/gui/*`
 
 | Gambas form | Port |
 | --- | --- |
@@ -124,10 +135,10 @@ are computed properties, so `$WORK_DIR/FileSystem` is never re-derived by
 hand.
 
 **Errors raise, they don't exit.** Bash's `ERROR_MESSAGE` printed and called
-`exit 2`. The port's `messages.error()` raises `LiveCDError`, caught in
+`exit 2`. The port's `messages.error()` raises `LiveUSBError`, caught in
 `cli.py`'s `root_it()` which then exits 2. This keeps the backend importable
 and testable — a library that calls `sys.exit` is miserable to test. If you
-add a new entry point, catch `LiveCDError`.
+add a new entry point, catch `LiveUSBError`.
 
 **GUI shells out to the CLI.** Same as the original: the Gambas GUI ran
 `terminal -e "live-cd.sh -e"`. The port does the same via
@@ -137,8 +148,12 @@ directly — that preserves the original's model where long operations run
 visibly in a terminal the user can watch and interrupt.
 
 **`resources.py` handles dev-vs-installed paths.** Icons live at the repo root
-(`icons/`, `live-cd.svg`) in a checkout, but at `/usr/share/live-cd` once
+(`icons/`, `live-usb.svg`) in a checkout, but at `/usr/share/live-usb` once
 packaged. Everything goes through `resources.find_pixmap()` so both work.
+(This module's dev-checkout path math assumed the pre-flatten
+`repo_root/python/liveusb/` nesting and quietly broke — `app_icon_path()`
+returned `None` in a checkout — when `python/` was flattened away earlier
+today. Fixed alongside this rename; see §7 item 5.)
 
 ---
 
@@ -165,7 +180,7 @@ CLI's first status line because config loaded after it printed. Fixed —
 `main()` now loads config up front, mirroring `live-cd.sh` sourcing at the
 top.
 
-**Two more bugs were caught in a later review pass** (see §7).
+**Three more bugs were caught in later review passes** (see §7).
 
 **Not verified — and this is the important part:**
 
@@ -273,6 +288,25 @@ Keep this list current — it's how the two implementations stay comparable.
      Bash strips through the *last* occurrence; `find` matches the first. With
      a work directory like `/home/FileSystem/work`, the port would have created
      symlinks at the wrong path inside the chroot. Now uses `rfind`.
+5. **Config paths renamed, not just cosmetics.** As part of the LiveCD →
+   LiveUSB rename, `constants.ETC_DIR` changed from `/etc/live-cd` to
+   `/etc/live-usb`, and `DEFAULT_WORK_DIR` from `/home/live-cd` to
+   `/home/live-usb`. This was a deliberate choice, not an oversight: the
+   port has never shipped or run against a real ISO, so there is no real
+   `/etc/live-cd` install in the field to stay compatible with. If that
+   assumption is ever wrong, an existing `/etc/live-cd` config will simply
+   not be found — there is no fallback/migration path from the old
+   directory, by design.
+6. **A third self-introduced bug, found while doing the LiveUSB rename.**
+   `resources.py`'s dev-checkout path math (`_GUI_DIR` → one `pardir` hop →
+   `_REPO_ROOT`) was written for the pre-flatten `python/livecd/` nesting.
+   When `python/` was flattened to the repo root earlier the same day, this
+   math silently started resolving one directory too high
+   (`_REPO_ROOT` landed on `Projects/` instead of `Projects/live-cd/`), so
+   `app_icon_path()`/`app_png_path()` returned `None` in a dev checkout.
+   Nothing exercises this path in `py_compile` or the CLI smoke test, which
+   is why it wasn't caught immediately. Fixed by removing the now-redundant
+   extra `pardir` hop.
 
 ---
 
@@ -288,7 +322,7 @@ Xvfb :99 -screen 0 1024x768x24 &
 export DISPLAY=:99
 
 # Fake environment
-sudo mkdir -p /etc/live-cd
+sudo mkdir -p /etc/live-usb
 mkdir -p /tmp/lcd/work/FileSystem/etc /tmp/lcd/work/FileSystem/{usr,root} \
          /tmp/lcd/work/ISO/.disk
 printf 'DISTRIB_ID=CustomOS\nDISTRIB_RELEASE=1.0\nDISTRIB_CODENAME=test\n' \
@@ -297,21 +331,21 @@ printf 'export USERNAME="live"\nexport HOST="host"\n' \
   > /tmp/lcd/work/FileSystem/etc/casper.conf
 echo 'http://example.com/notes' > /tmp/lcd/work/ISO/.disk/release_notes_url
 printf 'WORK_DIR=/tmp/lcd/work\nMOUNT_DIR=/mnt\nMESSAGES_COLORS=1\n' \
-  | sudo tee /etc/live-cd/default
+  | sudo tee /etc/live-usb/default
 
 sudo -E python3 -c "
 import sys; sys.path.insert(0,'.')
-from livecd.gui.gtkcompat import Gtk
-from livecd.gui.main_window import MainWindow
+from liveusb.gui.gtkcompat import Gtk
+from liveusb.gui.main_window import MainWindow
 mw = MainWindow(on_close=Gtk.main_quit)
 print('distname:', mw.distname_entry.get_text())
 print('build_iso enabled:', mw.build_iso_btn.get_sensitive())
 "
 ```
 
-Gotcha that cost time: if a previous run died, `/etc/live-cd/gui_lock` is left
+Gotcha that cost time: if a previous run died, `/etc/live-usb/gui_lock` is left
 behind and the next launch blocks on an "already running" dialog with no
-window manager to dismiss it. `rm -f /etc/live-cd/gui_lock` between runs.
+window manager to dismiss it. `rm -f /etc/live-usb/gui_lock` between runs.
 
 **Step 2 — Look at the GUI on a real desktop.** Just launch it. Check
 layout, sizing, whether icons resolve. Nobody has ever seen these windows.
@@ -330,7 +364,7 @@ results. Ideal for `config.py` edits (`DistName` change, timezone change) and
 for `md5sum.txt` generation.
 
 **Step 5 — The real thing.** Ubuntu Mini Remix is the smallest sensible
-target. `live-cd -e`, then `-r`, then `-q` to boot it in QEMU. Expect
+target. `live-usb -e`, then `-r`, then `-q` to boot it in QEMU. Expect
 `rebuild.py` to need fixes. Keep the Bash version's output alongside for
 comparison.
 

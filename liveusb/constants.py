@@ -1,16 +1,16 @@
-"""Filesystem paths and default values used throughout LiveCD Creator."""
+"""Filesystem paths and default values used throughout LiveUSB Creator."""
 
 import os
 
-ETC_DIR = "/etc/live-cd"
+ETC_DIR = "/etc/live-usb"
 CONFIG_FILE = os.path.join(ETC_DIR, "default")
 EXCLUDE_FILE = os.path.join(ETC_DIR, "exclude")
 GUI_LOCK_FILE = os.path.join(ETC_DIR, "gui_lock")
 
-DEFAULT_WORK_DIR = "/home/live-cd"
+DEFAULT_WORK_DIR = "/home/live-usb"
 DEFAULT_MOUNT_DIR = "/mnt"
 
-DEFAULT_CONFIG_CONTENT = """WORK_DIR=/home/live-cd
+DEFAULT_CONFIG_CONTENT = """WORK_DIR=/home/live-usb
 MOUNT_DIR=/mnt
 
 # Preferences

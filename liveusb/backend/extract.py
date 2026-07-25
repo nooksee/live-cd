@@ -1,4 +1,4 @@
-"""Port of .hidden/scripts/extract: extract a LiveCD ISO image into the work dir."""
+"""Port of .hidden/scripts/extract: extract a LiveUSB ISO image into the work dir."""
 
 import os
 import shutil
@@ -44,7 +44,7 @@ def run_extract(ctx):
     if not ok:
         messages.error_no_exit("This is not a usable image file!")
         _clean(ctx, mount_point)
-        raise messages.LiveCDError("not a usable image file")
+        raise messages.LiveUSBError("not a usable image file")
 
     messages.info("Extracting FileSystem")
     if run(["unsquashfs", "-f", "-d", ctx.fs_dir, os.path.join(mount_point, "casper/filesystem.squashfs")]).returncode != 0:
@@ -59,7 +59,7 @@ def run_extract(ctx):
     if arch == "amd64" and machine != "x86_64":
         messages.error_no_exit("The image file's architecture is amd64, yours is not!")
         _clean(ctx, mount_point)
-        raise messages.LiveCDError("architecture mismatch")
+        raise messages.LiveUSBError("architecture mismatch")
 
     messages.info("Copying extracted files")
     rsync_result = run([

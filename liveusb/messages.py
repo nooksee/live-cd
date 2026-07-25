@@ -58,7 +58,7 @@ def extra_warning(msg, extra):
         print(f"[!] {msg}: {extra}")
 
 
-class LiveCDError(Exception):
+class LiveUSBError(Exception):
     """Raised for a fatal error condition (mirrors ERROR_MESSAGE's exit 2)."""
 
 
@@ -72,7 +72,7 @@ def error(msg, wait_for_enter=True):
             input()
         except EOFError:
             pass
-    raise LiveCDError(msg)
+    raise LiveUSBError(msg)
 
 
 def error_no_exit(msg):
@@ -95,7 +95,7 @@ def extra_error(msg, extra):
         input()
     except EOFError:
         pass
-    raise LiveCDError(f"{msg}: {extra}")
+    raise LiveUSBError(f"{msg}: {extra}")
 
 
 def extra_error_no_exit(msg, extra):

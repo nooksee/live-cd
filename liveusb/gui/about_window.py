@@ -17,7 +17,7 @@ class AboutWindow:
         self.window.add(box)
 
         title = Gtk.Label()
-        title.set_markup(f"<span size='xx-large' weight='bold'>LiveCD Creator 3</span>")
+        title.set_markup(f"<span size='xx-large' weight='bold'>LiveUSB Creator 3</span>")
         box.pack_start(title, False, False, 0)
 
         icon_path = resources.app_icon_path()
@@ -28,7 +28,7 @@ class AboutWindow:
             except Exception:
                 pass
 
-        label = Gtk.Label(label="An advanced LiveCD customization and remastering tool.")
+        label = Gtk.Label(label="An advanced LiveUSB customization and remastering tool.")
         label.set_line_wrap(True)
         label.set_justify(Gtk.Justification.CENTER)
         box.pack_start(label, False, False, 0)

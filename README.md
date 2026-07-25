@@ -1,4 +1,4 @@
-# LiveCD Creator 3
+# LiveUSB Creator 3
 # Copyright (C) 2012-2014  Kevin Atwood
 # 
 # Customizer - Advanced LiveCD Remastering Tool
@@ -18,32 +18,32 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
-An advanced LiveCD customization and remastering tool. With it, you can build your own Ubuntu based remix using Ubuntu Mini Remix, Ubuntu or its derivatives from an ISO image.
+An advanced LiveUSB customization and remastering tool. With it, you can build your own Ubuntu based remix using Ubuntu Mini Remix, Ubuntu or its derivatives from an ISO image.
 
-This is the Python implementation of LiveCD Creator (GTK3/PyGObject GUI +
+This is the Python implementation of LiveUSB Creator (GTK3/PyGObject GUI +
 Python backend), for Ubuntu 14.04 and its derivatives.
 
-The project originally shipped as a Gambas3 GUI backed by Bash scripts. That
-implementation was retired from this repository on 2026-07-25 and archived,
-verified byte-identical, to
+The project originally shipped as LiveCD Creator: a Gambas3 GUI backed by
+Bash scripts. That implementation was retired from this repository on
+2026-07-25 and archived, verified byte-identical, to
 `/media/nos4r2/hard_vol2/LiveCD-Original-2015-Archive/`; it remains visible
-in git history before commit `edfcc62`. See `HANDOFF.md` for the
-architecture map, risk register, and what has and has not been verified in
-this implementation.
+in git history before the rename. See `HANDOFF.md` for the architecture map,
+risk register, and what has and has not been verified in this
+implementation.
 
 ## Layout
 
 ```
 bin/
-  live-cd          # CLI entrypoint (backend actions)
-  live-cd-gui       # GUI entrypoint
-livecd/
+  live-usb          # CLI entrypoint (backend actions)
+  live-usb-gui       # GUI entrypoint
+liveusb/
   constants.py      # paths & defaults
   messages.py        # colored console messages
   config.py           # Get_Str/Replace_Str-style key=value file helpers
   fsutil.py            # editor/terminal/file-manager detection
   resources.py          # icon/pixmap/cli lookup, dev checkout + installed layouts
-  cli.py                 # `live-cd` entrypoint
+  cli.py                 # `live-usb` entrypoint
   backend/                # one module per backend action
     mounts.py, chroot.py, extract.py, cdimage.py, chroot_shell.py,
     clean.py, deb.py, gui_install.py, hook.py, pkgm.py, qemu.py,
@@ -62,35 +62,38 @@ livecd/
 - `mount`, `chroot`, `unsquashfs`/`mksquashfs`, `rsync`, `genisoimage`,
   `qemu-system-*`, `Xephyr`, `wget`, ImageMagick's `convert`
 
-The backend actions (`live-cd -e/-r/-c/...`) require root.
+The backend actions (`live-usb -e/-r/-c/...`) require root.
 
 ## Usage
 
 ```
 # Backend CLI
-bin/live-cd --help
-bin/live-cd -e     # extract an ISO into the work directory
-bin/live-cd -r     # rebuild the ISO
-bin/live-cd -c     # open a chroot shell
+bin/live-usb --help
+bin/live-usb -e     # extract an ISO into the work directory
+bin/live-usb -r     # rebuild the ISO
+bin/live-usb -c     # open a chroot shell
 
 # GUI
-bin/live-cd-gui
+bin/live-usb-gui
 ```
 
 Or install it properly:
 
 ```
 pip install -e .[gui]
-live-cd --help
-live-cd-gui
+live-usb --help
+live-usb-gui
 ```
 
 ## Notes on fidelity
 
-Config/state files (`/etc/live-cd/default`, `casper.conf`, `lsb-release`,
-`gfxboot.cfg`, etc.) use the same `KEY=value` line format and the same paths
-as the retired Bash/Gambas implementation, so an existing `/etc/live-cd`
-installation continues to work unchanged.
+Config/state files (`casper.conf`, `lsb-release`, `gfxboot.cfg`, etc.) use
+the same `KEY=value` line format the retired Bash/Gambas implementation
+used. The top-level config directory itself is a deliberate divergence,
+not a fidelity claim: it is now `/etc/live-usb` (was `/etc/live-cd`), and
+the default work directory is now `/home/live-usb` (was `/home/live-cd`).
+An old `/etc/live-cd` installation from the original LiveCD Creator is
+**not** picked up automatically — see `HANDOFF.md` §7.
 
 This GUI could not be visually tested in the environment it was written in
 (no working GTK/X11 display) — sanity-check window layouts on a real desktop

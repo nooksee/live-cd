@@ -51,16 +51,28 @@ Objective:
 > Complete one no-change round trip using the known-good 2015 `ubuntuDE`
 > media: extract, rebuild, validate, and boot in QEMU.
 
+Accepted Phase 1A baseline:
+
+- commit `877036d`;
+- Python 3.8 grammar and import validation: `39/39` and `39/39`;
+- characterization tests: `15/15`;
+- process smokes: `3/3`;
+- invalid arguments rejected before configuration, privilege, or action
+  effects;
+- original scripts and Python backend modules compared: `11/11` and `13/13`.
+
 Work:
 
-1. Create characterization tests for configuration parsing, CLI dispatch,
-   media recognition, command construction, and checksum generation.
+1. Extend the accepted characterization baseline beyond configuration
+   parsing, CLI dispatch, and checksum generation to media recognition,
+   command construction, and injected failure behavior.
 2. Isolate subprocess execution enough to inspect and test command plans.
 3. Add dependency, privilege, disk-space, media-layout, and workspace
    preflight reporting.
 4. Make mount, chroot, lock, temporary-file, and blocked-file cleanup
    deterministic under success and injected failure.
-5. Correct immediate launch and argument-handling failures.
+5. Correct remaining launch and argument-handling failures. Full argument
+   prevalidation is complete.
 6. Execute the legacy extract and no-change rebuild in a bounded workspace.
 7. Validate ISO structure, preserve the input byte-identically, and boot the
    output in QEMU.
@@ -75,6 +87,10 @@ Acceptance:
 - residual mounts, locks, blocked files, and abandoned temporary roots:
   `0/0/0/0`;
 - exact commands, logs, output hashes, failures, and deviations recorded.
+
+The rebuilt `md5sum.txt` is sorted while the original shell implementation
+used filesystem traversal order. Acceptance compares the set of checksum
+records or the individual payload hashes, not raw manifest byte order.
 
 Excluded from Phase 1:
 

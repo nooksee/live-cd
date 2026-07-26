@@ -20,10 +20,13 @@ extract → no-change rebuild → QEMU boot cycle promotes the project to
 
 ## Verified baseline
 
-- Python source files passing syntax compilation: `35/35`.
-- Importable discovered modules: `34/34`.
+- Python source files passing syntax and Python 3.8 grammar validation:
+  `39/39`.
+- Importable discovered modules: `39/39`.
 - CLI help and version paths returning successfully: `2/2`.
-- Current tracked test files: `0`.
+- Current tracked test modules: `4`.
+- Phase 1A unit tests passing: `15/15`.
+- Phase 1A process smokes passing: `3/3`.
 - Successful remaster cycles produced by the Python implementation: `0`.
 - Successful QEMU boots of Python-generated media: `0`.
 - Real-desktop GUI acceptance passes: `0`.
@@ -31,6 +34,26 @@ extract → no-change rebuild → QEMU boot cycle promotes the project to
 The archived translation-session evidence records one prior Xvfb
 window-construction pass across the translated GUI. That is implementation
 evidence, not current product acceptance.
+
+## Phase 1A evidence
+
+Commit `877036d` establishes the first characterization suite and corrects
+CLI argument validation. Unknown arguments now return status `2` before
+configuration, privilege, or action side effects. Mixed valid and invalid
+arguments execute actions `0` times. Valid action order and duplicates remain
+preserved.
+
+The suite currently characterizes:
+
+- CLI help, version, rejection, ordering, and duplicate dispatch;
+- configuration quoting, unquoting, replacement, and default insertion;
+- deterministic checksum generation and `md5sum.txt` exclusion.
+
+Claude Devens completed a read-only fidelity comparison over original scripts
+`11/11` and Python backend modules `13/13`. The review confirmed five defects,
+four other behavioral divergences, and four untested risk classes. The
+accepted findings and legacy acceptance caveat are recorded in
+`docs/reviews/phase1a-fidelity-review-20260726.md`.
 
 ## Media evidence
 
@@ -52,15 +75,18 @@ The current engine therefore cannot claim modern Ubuntu media support.
 
 ## Immediate blockers
 
-1. There is no automated test suite.
-2. Extract and rebuild are hard-wired to the older single-SquashFS and
+1. Characterization coverage does not yet include media recognition, command
+   construction, or injected transaction failures.
+2. Extract and rebuild remain hard-wired to the older single-SquashFS and
    `isolinux` media layout.
 3. Mount and chroot cleanup are not transaction-safe across every failure.
 4. Operational privilege handling still reflects the older root-process
    model.
-5. Invalid operational arguments can reach privileged configuration
-   initialization before clean rejection.
-6. The GUI has not completed real-desktop product acceptance.
+5. EFI kernel naming detection searches filenames where the original searched
+   media contents, which can select the wrong output kernel name.
+6. The translated default VRAM value is `1024`, while the original default is
+   `2048`.
+7. The GUI has not completed real-desktop product acceptance.
 
 ## Current acceptance gate
 
@@ -73,4 +99,5 @@ Phase 1 is the only active product gate:
 See `ROADMAP.md` for scope, team lanes, exclusions, and later phases. See
 `docs/history/python-port-handoff-20260725.md` only for historical
 translation mapping, prior verification evidence, and the inherited risk
-register.
+register. See `docs/reviews/phase1a-fidelity-review-20260726.md` for the
+accepted behavioral comparison and checksum-comparison caveat.

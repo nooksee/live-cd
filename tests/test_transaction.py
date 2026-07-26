@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
 import tempfile
@@ -16,6 +17,7 @@ from liveusb.backend import transaction as transaction_module
 from liveusb.backend.transaction import (
     ChrootTransaction,
     TransactionCleanupError,
+    TransactionRecoveryError,
 )
 
 
@@ -184,13 +186,90 @@ class ChrootTransactionTests(unittest.TestCase):
             yield
 
     def _assert_no_transaction_residue(self):
-        self.assertFalse(
-            os.path.lexists(str(self.fs_dir / "tmp/lock_chroot"))
+        counts = self._transaction_residual_counts()
+        self.assertEqual(
+            counts,
+            {
+                "backups": 0,
+                "blocked_files": 0,
+                "journals": 0,
+                "locks": 0,
+                "transaction_symlinks": 0,
+            },
         )
-        backups = tuple(
-            self.fs_dir.rglob("*.liveusb-transaction-*")
+
+    def _transaction_residual_counts(self):
+        journal = (
+            self.work_dir / ".liveusb-chroot-transaction.json"
         )
-        self.assertEqual(backups, tuple())
+        pending = tuple(
+            self.work_dir.glob(
+                ".liveusb-chroot-transaction.json.pending-*"
+            )
+        )
+        transaction_symlinks = 0
+        for root, directory_names, file_names in os.walk(
+            str(self.fs_dir),
+            followlinks=False,
+        ):
+            for name in tuple(directory_names) + tuple(file_names):
+                path = os.path.join(root, name)
+                if (
+                    os.path.islink(path)
+                    and os.readlink(path) == "/bin/true"
+                ):
+                    transaction_symlinks += 1
+        return {
+            "backups": len(
+                tuple(
+                    self.fs_dir.rglob(
+                        "*.liveusb-transaction-*"
+                    )
+                )
+            ),
+            "blocked_files": len(
+                tuple(self.fs_dir.rglob("*.blocked"))
+            ),
+            "journals": int(os.path.lexists(str(journal))) + len(pending),
+            "locks": int(
+                os.path.lexists(
+                    str(self.fs_dir / "tmp/lock_chroot")
+                )
+            ),
+            "transaction_symlinks": transaction_symlinks,
+        }
+
+    def _simulate_process_crash(self, transaction):
+        transaction._close_lock_descriptor()
+        transaction._lock_owned = False
+
+    def _tree_evidence_snapshot(self):
+        evidence = {}
+        for root, directory_names, file_names in os.walk(
+            str(self.fs_dir),
+            followlinks=False,
+        ):
+            for name in tuple(directory_names) + tuple(file_names):
+                path = Path(root) / name
+                if path.is_dir() and not path.is_symlink():
+                    continue
+                evidence[str(path.relative_to(self.fs_dir))] = (
+                    _node_snapshot(path)
+                )
+        metadata_paths = (
+            self.work_dir / ".liveusb-chroot-transaction.json",
+            *tuple(
+                self.work_dir.glob(
+                    ".liveusb-chroot-transaction.json.pending-*"
+                )
+            ),
+        )
+        for path in metadata_paths:
+            if os.path.lexists(str(path)):
+                evidence[
+                    "work/" + str(path.relative_to(self.work_dir))
+                ] = _node_snapshot(path)
+        return evidence
 
     def test_success_restores_exact_managed_nodes_and_records_services(self):
         self._seed_managed_nodes()
@@ -280,15 +359,448 @@ class ChrootTransactionTests(unittest.TestCase):
             self.assertEqual(_node_snapshot(path), snapshot)
 
     def test_forced_stale_lock_takeover_leaves_no_lock(self):
-        lock_path = self.fs_dir / "tmp/lock_chroot"
-        self._write_file(lock_path, b"stale lock\n", 0o600)
+        abandoned = self._transaction()
+        abandoned._ensure_lock_directory()
+        abandoned._create_new_lock()
+        lock_path = Path(abandoned.lock_path)
+        stale_lock = json.loads(
+            lock_path.read_text(encoding="utf-8")
+        )
+        self._simulate_process_crash(abandoned)
         self.ctx.force_chroot = True
 
-        with self._transaction():
-            self.assertTrue(os.path.lexists(str(lock_path)))
-            self.assertNotEqual(lock_path.read_bytes(), b"stale lock\n")
-            self.assertEqual(len(lock_path.read_bytes()), 32)
+        with mock.patch.object(
+            ChrootTransaction,
+            "_pid_is_live",
+            return_value=False,
+        ):
+            with self._transaction():
+                replacement_lock = json.loads(
+                    lock_path.read_text(encoding="utf-8")
+                )
+                self.assertNotEqual(
+                    replacement_lock["token"],
+                    stale_lock["token"],
+                )
 
+        self._assert_no_transaction_residue()
+
+    def test_forced_takeover_rejects_live_owner_without_mutation(self):
+        self._seed_managed_nodes()
+        abandoned = self._transaction()
+        abandoned.__enter__()
+        evidence_before = self._tree_evidence_snapshot()
+        self.ctx.force_chroot = True
+
+        with self.assertRaisesRegex(
+            TransactionRecoveryError,
+            "ownership is active",
+        ):
+            with self._transaction():
+                self.fail("Live ownership must prevent takeover")
+
+        self.assertEqual(
+            self._tree_evidence_snapshot(),
+            evidence_before,
+        )
+        abandoned.cleanup()
+        self._assert_no_transaction_residue()
+
+    def test_managed_recovery_records_precede_first_mutation(self):
+        self._seed_managed_nodes()
+        transaction = self._transaction()
+        real_rename = transaction._rename_durable
+        observations = []
+
+        def inspect_first_rename(source, destination):
+            if not observations:
+                lock_data = json.loads(
+                    Path(transaction.lock_path).read_text(
+                        encoding="utf-8"
+                    )
+                )
+                journal_data = json.loads(
+                    Path(transaction.journal_path).read_text(
+                        encoding="utf-8"
+                    )
+                )
+                observations.append(
+                    (
+                        lock_data,
+                        journal_data,
+                        source,
+                        destination,
+                    )
+                )
+            return real_rename(source, destination)
+
+        with mock.patch.object(
+            transaction,
+            "_rename_durable",
+            side_effect=inspect_first_rename,
+        ):
+            with transaction:
+                pass
+
+        self.assertEqual(len(observations), 1)
+        lock_data, journal_data, _source, _destination = observations[0]
+        self.assertEqual(lock_data["pid"], os.getpid())
+        self.assertEqual(len(lock_data["token"]), 32)
+        self.assertEqual(
+            journal_data["owner"],
+            {
+                "pid": lock_data["pid"],
+                "token": lock_data["token"],
+            },
+        )
+        self.assertEqual(
+            {
+                record["path"]
+                for record in journal_data["managed"]
+            },
+            {
+                "etc/hosts",
+                "etc/resolv.conf",
+                "etc/debian_chroot",
+                "etc/mtab",
+            },
+        )
+        self.assertEqual(len(journal_data["managed"]), 4)
+        self._assert_no_transaction_residue()
+
+    def test_service_recovery_records_precede_first_rename(self):
+        first_service = self._seed_service("sbin/initctl")
+        second_service = self._seed_service(
+            "etc/init.d/example-service",
+        )
+
+        with self._transaction() as transaction:
+            real_rename = transaction._rename_durable
+            observations = []
+
+            def inspect_first_service_rename(source, destination):
+                if not observations:
+                    observations.append(
+                        json.loads(
+                            Path(transaction.journal_path).read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                    )
+                return real_rename(source, destination)
+
+            with mock.patch.object(
+                transaction,
+                "_rename_durable",
+                side_effect=inspect_first_service_rename,
+            ):
+                transaction.block_files(
+                    (str(first_service), str(second_service))
+                )
+
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(
+            {
+                record["path"]
+                for record in observations[0]["services"]
+            },
+            {
+                "sbin/initctl",
+                "etc/init.d/example-service",
+            },
+        )
+        self.assertEqual(len(observations[0]["services"]), 2)
+        self._assert_no_transaction_residue()
+
+    def test_crash_recovery_restores_managed_substitution_first(self):
+        self._seed_managed_nodes()
+        managed_before = {
+            path: _node_snapshot(path)
+            for path in self._managed_paths()
+        }
+        abandoned = self._transaction()
+        abandoned.__enter__()
+        self.assertNotEqual(
+            _node_snapshot(self.fs_dir / "etc/hosts"),
+            managed_before[self.fs_dir / "etc/hosts"],
+        )
+        self._simulate_process_crash(abandoned)
+        self.ctx.force_chroot = True
+
+        with mock.patch.object(
+            ChrootTransaction,
+            "_pid_is_live",
+            return_value=False,
+        ):
+            with self._transaction():
+                pass
+
+        for path, snapshot in managed_before.items():
+            self.assertEqual(_node_snapshot(path), snapshot)
+        self._assert_no_transaction_residue()
+
+    def test_crash_recovery_restores_rename_before_stub(self):
+        self._seed_managed_nodes()
+        service = self._seed_service("sbin/initctl")
+        service_before = _node_snapshot(service)
+        abandoned = self._transaction()
+        abandoned.__enter__()
+
+        def interrupt_before_stub(_path):
+            raise RuntimeError("simulated crash before stub")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "simulated crash before stub",
+        ):
+            abandoned.block_files(
+                (str(service),),
+                interrupt_before_stub,
+            )
+        self.assertFalse(os.path.lexists(str(service)))
+        self.assertTrue(
+            os.path.lexists(str(service) + ".blocked")
+        )
+        self._simulate_process_crash(abandoned)
+        self.ctx.force_chroot = True
+
+        with mock.patch.object(
+            ChrootTransaction,
+            "_pid_is_live",
+            return_value=False,
+        ):
+            with self._transaction():
+                pass
+
+        self.assertEqual(_node_snapshot(service), service_before)
+        self._assert_no_transaction_residue()
+
+    def test_crash_recovery_restores_completed_stub(self):
+        self._seed_managed_nodes()
+        service = self._seed_service("sbin/initctl")
+        service_before = _node_snapshot(service)
+        abandoned = self._transaction()
+        abandoned.__enter__()
+        abandoned.block_files((str(service),))
+        self.assertTrue(os.path.islink(str(service)))
+        self._simulate_process_crash(abandoned)
+        self.ctx.force_chroot = True
+
+        with mock.patch.object(
+            ChrootTransaction,
+            "_pid_is_live",
+            return_value=False,
+        ):
+            with self._transaction():
+                pass
+
+        self.assertEqual(_node_snapshot(service), service_before)
+        self._assert_no_transaction_residue()
+
+    def test_crash_recovery_preserves_package_replacement(self):
+        self._seed_managed_nodes()
+        service = self._seed_service("sbin/initctl")
+        abandoned = self._transaction()
+        abandoned.__enter__()
+        abandoned.block_files((str(service),))
+        os.unlink(str(service))
+        self._write_file(
+            service,
+            b"package replacement after crash\n",
+            0o755,
+        )
+        self._simulate_process_crash(abandoned)
+        self.ctx.force_chroot = True
+
+        with mock.patch.object(
+            ChrootTransaction,
+            "_pid_is_live",
+            return_value=False,
+        ), mock.patch.object(messages, "warning"):
+            with self._transaction():
+                pass
+
+        self.assertEqual(
+            service.read_bytes(),
+            b"package replacement after crash\n",
+        )
+        self._assert_no_transaction_residue()
+
+    def test_crash_recovery_rejects_corrupt_metadata_unchanged(self):
+        self._seed_managed_nodes()
+        abandoned = self._transaction()
+        abandoned.__enter__()
+        self._simulate_process_crash(abandoned)
+        journal_path = Path(abandoned.journal_path)
+        journal_path.write_bytes(b"{corrupt recovery metadata")
+        evidence_before = self._tree_evidence_snapshot()
+        self.ctx.force_chroot = True
+
+        with mock.patch.object(
+            ChrootTransaction,
+            "_pid_is_live",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(
+                TransactionRecoveryError,
+                "metadata is corrupt",
+            ):
+                with self._transaction():
+                    self.fail("Corrupt recovery metadata must fail closed")
+
+        self.assertEqual(
+            self._tree_evidence_snapshot(),
+            evidence_before,
+        )
+
+    def test_crash_recovery_rejects_ambiguous_owner_unchanged(self):
+        self._seed_managed_nodes()
+        abandoned = self._transaction()
+        abandoned.__enter__()
+        self._simulate_process_crash(abandoned)
+        journal_path = Path(abandoned.journal_path)
+        journal_data = json.loads(
+            journal_path.read_text(encoding="utf-8")
+        )
+        journal_data["owner"]["token"] = "f" * 32
+        journal_path.write_text(
+            json.dumps(
+                journal_data,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        evidence_before = self._tree_evidence_snapshot()
+        self.ctx.force_chroot = True
+
+        with mock.patch.object(
+            ChrootTransaction,
+            "_pid_is_live",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(
+                TransactionRecoveryError,
+                "ownership is invalid",
+            ):
+                with self._transaction():
+                    self.fail("Ambiguous recovery metadata must fail closed")
+
+        self.assertEqual(
+            self._tree_evidence_snapshot(),
+            evidence_before,
+        )
+
+    def test_crash_recovery_preflights_all_state_before_mutation(self):
+        self._seed_managed_nodes()
+        service = self._seed_service("sbin/initctl")
+        abandoned = self._transaction()
+        abandoned.__enter__()
+        abandoned.block_files((str(service),))
+        self._simulate_process_crash(abandoned)
+        hosts_backups = tuple(
+            self.fs_dir.glob(
+                "etc/hosts.liveusb-transaction-*"
+            )
+        )
+        self.assertEqual(len(hosts_backups), 1)
+        hosts_backups[0].write_bytes(b"ambiguous backup content\n")
+        evidence_before = self._tree_evidence_snapshot()
+        self.ctx.force_chroot = True
+
+        with mock.patch.object(
+            ChrootTransaction,
+            "_pid_is_live",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(
+                TransactionRecoveryError,
+                "backup is ambiguous",
+            ):
+                with self._transaction():
+                    self.fail("Ambiguous state must fail before recovery")
+
+        self.assertEqual(
+            self._tree_evidence_snapshot(),
+            evidence_before,
+        )
+
+    def test_crash_recovery_retries_after_interruption(self):
+        self._seed_managed_nodes()
+        service = self._seed_service("sbin/initctl")
+        managed_before = {
+            path: _node_snapshot(path)
+            for path in self._managed_paths()
+        }
+        service_before = _node_snapshot(service)
+        abandoned = self._transaction()
+        abandoned.__enter__()
+        abandoned.block_files((str(service),))
+        self._simulate_process_crash(abandoned)
+
+        hosts_path = self.fs_dir / "etc/hosts"
+        hosts_backups = tuple(
+            self.fs_dir.glob(
+                "etc/hosts.liveusb-transaction-*"
+            )
+        )
+        self.assertEqual(len(hosts_backups), 1)
+        hosts_backup = hosts_backups[0]
+        real_rename = transaction_module.os.rename
+        failed_once = False
+
+        def interrupt_one_recovery(source, destination):
+            nonlocal failed_once
+            if (
+                not failed_once
+                and source == str(hosts_backup)
+                and destination == str(hosts_path)
+            ):
+                failed_once = True
+                raise OSError("simulated interrupted recovery")
+            return real_rename(source, destination)
+
+        self.ctx.force_chroot = True
+        with mock.patch.object(
+            ChrootTransaction,
+            "_pid_is_live",
+            return_value=False,
+        ), mock.patch.object(
+            transaction_module.os,
+            "rename",
+            side_effect=interrupt_one_recovery,
+        ):
+            with self.assertRaises(TransactionCleanupError) as captured:
+                with self._transaction():
+                    self.fail("Incomplete recovery must prevent replacement")
+
+        self.assertEqual(len(captured.exception.failures), 1)
+        self.assertEqual(
+            captured.exception.failures[0].operation,
+            "restore_managed_node",
+        )
+        interrupted_counts = self._transaction_residual_counts()
+        self.assertEqual(interrupted_counts["locks"], 1)
+        self.assertEqual(interrupted_counts["journals"], 1)
+        self.assertEqual(interrupted_counts["backups"], 1)
+        self.assertEqual(interrupted_counts["blocked_files"], 0)
+        self.assertEqual(
+            interrupted_counts["transaction_symlinks"],
+            0,
+        )
+
+        with mock.patch.object(
+            ChrootTransaction,
+            "_pid_is_live",
+            return_value=False,
+        ):
+            with self._transaction():
+                pass
+
+        for path, snapshot in managed_before.items():
+            self.assertEqual(_node_snapshot(path), snapshot)
+        self.assertEqual(_node_snapshot(service), service_before)
         self._assert_no_transaction_residue()
 
     def test_setup_failure_after_partial_mutation_restores_every_node(self):
@@ -502,8 +1014,16 @@ class ChrootTransactionTests(unittest.TestCase):
                 str(second_service) + ".blocked"
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             os.path.lexists(str(self.fs_dir / "tmp/lock_chroot"))
+        )
+        self.assertTrue(
+            os.path.lexists(
+                str(
+                    self.work_dir
+                    / ".liveusb-chroot-transaction.json"
+                )
+            )
         )
 
         transaction.cleanup()
@@ -579,8 +1099,16 @@ class ChrootTransactionTests(unittest.TestCase):
                 ("restore_blocked_file", str(second_service)),
             ],
         )
-        self.assertFalse(
+        self.assertTrue(
             os.path.lexists(str(self.fs_dir / "tmp/lock_chroot"))
+        )
+        self.assertTrue(
+            os.path.lexists(
+                str(
+                    self.work_dir
+                    / ".liveusb-chroot-transaction.json"
+                )
+            )
         )
 
         transaction.cleanup()

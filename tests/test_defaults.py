@@ -5,7 +5,16 @@ from unittest import mock
 
 from liveusb import constants
 from liveusb.backend import Context
-from liveusb.gui import settings_window
+
+try:
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk as _Gtk
+except (ImportError, ValueError):
+    settings_window = None
+else:
+    from liveusb.gui import settings_window
 
 
 class DefaultFidelityTests(unittest.TestCase):
@@ -32,6 +41,7 @@ class DefaultFidelityTests(unittest.TestCase):
 
         self.assertEqual(context.vram, constants.DEFAULT_VRAM)
 
+    @unittest.skipIf(settings_window is None, "PyGObject is not installed")
     def test_gui_uses_canonical_vram_fallback_without_launching(self) -> None:
         with mock.patch.object(
             settings_window.config,

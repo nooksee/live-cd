@@ -5,6 +5,7 @@ import os
 import shutil
 
 from . import run, run_ok
+from .transaction import ChrootTransaction
 from .. import messages
 
 
@@ -78,85 +79,132 @@ def chroot_run(ctx, *args):
     chroot_env = ["env", "HOME=/root", f"LC_ALL={ctx.locales}", f"LANGUAGE={ctx.locales}", f"LANG={ctx.locales}"]
 
     messages.info("Preparing work environment")
-    shutil.copyfile("/etc/hosts", os.path.join(ctx.fs_dir, "etc/hosts"))
-    shutil.copyfile("/etc/resolv.conf", os.path.join(ctx.fs_dir, "etc/resolv.conf"))
-    with open(os.path.join(ctx.fs_dir, "etc/debian_chroot"), "w") as fh:
-        fh.write("chroot\n")
-    mtab = os.path.join(ctx.fs_dir, "etc/mtab")
-    if os.path.exists(mtab) or os.path.islink(mtab):
-        os.remove(mtab)
-    os.symlink("/proc/mounts", mtab)
-    lock_dir = os.path.join(ctx.fs_dir, "tmp")
-    os.makedirs(lock_dir, exist_ok=True)
-    open(os.path.join(lock_dir, "lock_chroot"), "a").close()
+    transaction = ChrootTransaction(ctx)
+    result = None
+    cleanup_commands_enabled = False
 
-    messages.info("Setting up locale")
-    run(["chroot", ctx.fs_dir] + chroot_env + ["locale-gen", ctx.locales])
+    with transaction:
+        try:
+            messages.info("Setting up locale")
+            run(
+                ["chroot", ctx.fs_dir]
+                + chroot_env
+                + ["locale-gen", ctx.locales]
+            )
 
-    messages.info("Blocking files")
-    block_targets = [
+            messages.info("Blocking files")
+            transaction.block_files(
+                _service_block_targets(ctx),
+                lambda target: _create_service_stub(
+                    ctx,
+                    chroot_env,
+                    target,
+                ),
+            )
+            cleanup_commands_enabled = True
+
+            if ctx.apt_helper:
+                messages.info("Updating package database")
+                run(
+                    ["chroot", ctx.fs_dir]
+                    + chroot_env
+                    + ["apt-get", "update", "-qq"]
+                )
+                messages.info("Making sure everything is configured")
+                run(
+                    ["chroot", ctx.fs_dir]
+                    + chroot_env
+                    + ["dpkg", "--configure", "-a"]
+                )
+                run(
+                    ["chroot", ctx.fs_dir]
+                    + chroot_env
+                    + ["apt-get", "install", "-f", "-y", "-q"]
+                )
+
+            result = run(
+                ["chroot", ctx.fs_dir] + chroot_env + list(args)
+            )
+            if result.returncode != 0:
+                messages.warning("chroot has returned exit status")
+        finally:
+            messages.info("Unblocking files")
+            try:
+                transaction.unblock_services()
+            except Exception as error:
+                transaction.record_cleanup_failure(
+                    "unblock_services",
+                    ctx.fs_dir,
+                    error,
+                )
+
+            messages.info("Cleaning up work directories")
+            if cleanup_commands_enabled:
+                _run_chroot_cleanup_commands(
+                    ctx,
+                    chroot_env,
+                    transaction,
+                )
+            _cleanup_work_artifacts(ctx, transaction)
+
+    return result
+
+
+def _service_block_targets(ctx):
+    targets = [
         os.path.join(ctx.fs_dir, "sbin/initctl"),
         os.path.join(ctx.fs_dir, "usr/sbin/update-grub"),
     ]
     init_d = os.path.join(ctx.fs_dir, "etc/init.d")
     if os.path.isdir(init_d):
-        block_targets += [
+        targets.extend(
             os.path.join(init_d, name)
             for name in os.listdir(init_d)
-            if os.path.isfile(os.path.join(init_d, name)) and not name.endswith(".blocked")
-        ]
-    for target in block_targets:
-        blocked = target + ".blocked"
-        if not os.path.exists(target):
-            continue
-        if not os.path.exists(blocked):
-            os.rename(target, blocked)
-            # Mirrors bash's ${f##*FileSystem}, which strips through the LAST
-            # occurrence -- important when work_dir itself contains "FileSystem".
-            in_chroot_path = target[target.rfind("FileSystem") + len("FileSystem"):]
-            run(["chroot", ctx.fs_dir] + chroot_env + ["ln", "-s", "/bin/true", in_chroot_path])
-        else:
-            messages.warning(f"Blocking of {target} skipped!")
+            if os.path.isfile(os.path.join(init_d, name))
+            and not name.endswith(".blocked")
+        )
+    return targets
 
-    if ctx.apt_helper:
-        messages.info("Updating package database")
-        run(["chroot", ctx.fs_dir] + chroot_env + ["apt-get", "update", "-qq"])
-        messages.info("Making sure everything is configured")
-        run(["chroot", ctx.fs_dir] + chroot_env + ["dpkg", "--configure", "-a"])
-        run(["chroot", ctx.fs_dir] + chroot_env + ["apt-get", "install", "-f", "-y", "-q"])
 
-    result = run(["chroot", ctx.fs_dir] + chroot_env + list(args))
-    if result.returncode != 0:
-        messages.warning("chroot has returned exit status")
-
-    messages.info("Unblocking files")
-    unblock_candidates = [
-        os.path.join(ctx.fs_dir, "sbin/initctl.blocked"),
-        os.path.join(ctx.fs_dir, "usr/sbin/update-grub.blocked"),
+def _create_service_stub(ctx, chroot_env, target):
+    # Mirrors bash's ${f##*FileSystem}, which strips through the last
+    # occurrence when the work directory itself contains "FileSystem".
+    marker = "FileSystem"
+    in_chroot_path = target[
+        target.rfind(marker) + len(marker):
     ]
-    if os.path.isdir(init_d):
-        unblock_candidates += [
-            os.path.join(init_d, name) for name in os.listdir(init_d) if name.endswith(".blocked")
-        ]
-    for blocked in unblock_candidates:
-        original = blocked[: -len(".blocked")]
-        if os.path.islink(original):
-            os.remove(original)
-            os.rename(blocked, original)
-        elif os.path.isfile(blocked):
-            messages.warning(f"{original} has been updated, removing blocked file!")
-            os.remove(blocked)
-        else:
-            messages.warning(f"Unblocking of {blocked} skipped!")
+    result = run(
+        ["chroot", ctx.fs_dir]
+        + chroot_env
+        + ["ln", "-s", "/bin/true", in_chroot_path]
+    )
+    if result.returncode != 0:
+        raise messages.LiveUSBError(
+            f"Unable to create service stub for {target}"
+        )
+    return result
 
-    messages.info("Cleaning up work directories")
-    run(["chroot", ctx.fs_dir] + chroot_env + ["apt-get", "autoremove", "--purge"])
-    run(["chroot", ctx.fs_dir] + chroot_env + ["apt-get", "autoclean"])
-    run(["chroot", ctx.fs_dir] + chroot_env + ["apt-get", "clean"])
 
-    for name in ("debian_chroot", "hosts", "mtab"):
-        _silent_remove(os.path.join(ctx.fs_dir, "etc", name))
-    for pattern in (
+def _run_chroot_cleanup_commands(ctx, chroot_env, transaction):
+    cleanup_commands = (
+        ["apt-get", "autoremove", "--purge"],
+        ["apt-get", "autoclean"],
+        ["apt-get", "clean"],
+    )
+    for command in cleanup_commands:
+        full_command = ["chroot", ctx.fs_dir] + chroot_env + command
+        try:
+            run(full_command)
+        except Exception as error:
+            transaction.record_cleanup_failure(
+                "chroot_cleanup_command",
+                " ".join(full_command),
+                error,
+            )
+
+
+def _cleanup_work_artifacts(ctx, transaction):
+    patterns = (
         "boot/*.bak",
         "var/lib/dpkg/*-old",
         "var/lib/aptitude/*.old",
@@ -168,24 +216,52 @@ def chroot_run(ctx, *args):
         "etc/gshadow-",
         "etc/shadow-",
         "var/log/apt/term.log",
-    ):
+    )
+    for pattern in patterns:
         for path in glob.glob(os.path.join(ctx.fs_dir, pattern)):
-            _silent_remove(path)
+            _remove_cleanup_path(
+                path,
+                "remove_cleanup_artifact",
+                transaction,
+            )
 
     tmp_dir = os.path.join(ctx.fs_dir, "tmp")
-    if os.path.isdir(tmp_dir):
-        for name in os.listdir(tmp_dir):
-            path = os.path.join(tmp_dir, name)
-            if os.path.isdir(path) and not os.path.islink(path):
-                shutil.rmtree(path, ignore_errors=True)
-            else:
-                _silent_remove(path)
-
-    return result
-
-
-def _silent_remove(path):
+    if not os.path.isdir(tmp_dir):
+        return
     try:
-        os.remove(path)
-    except OSError:
-        pass
+        names = os.listdir(tmp_dir)
+    except OSError as error:
+        transaction.record_cleanup_failure(
+            "list_temporary_directory",
+            tmp_dir,
+            error,
+        )
+        return
+
+    for name in names:
+        path = os.path.join(tmp_dir, name)
+        if os.path.abspath(path) == os.path.abspath(
+            transaction.lock_path
+        ):
+            continue
+        _remove_cleanup_path(
+            path,
+            "remove_temporary_entry",
+            transaction,
+        )
+
+
+def _remove_cleanup_path(path, operation, transaction):
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path, ignore_errors=False)
+        else:
+            os.remove(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        transaction.record_cleanup_failure(
+            operation,
+            path,
+            error,
+        )

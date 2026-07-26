@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from liveusb import config
+from liveusb import config, constants
 
 
 class ConfigCharacterizationTests(unittest.TestCase):
@@ -98,6 +98,49 @@ class ConfigCharacterizationTests(unittest.TestCase):
             self.assertEqual(
                 path.read_text(encoding="utf-8"),
                 "TARGET=raw value\n",
+            )
+
+    def test_load_env_uses_canonical_vram_when_key_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "default"
+            exclude_path = Path(directory) / "exclude"
+            config_lines = [
+                line
+                for line in constants.DEFAULT_CONFIG_CONTENT.splitlines()
+                if not line.startswith("VRAM=")
+            ]
+            config_path.write_text(
+                "\n".join(config_lines) + "\n",
+                encoding="utf-8",
+            )
+            exclude_path.write_text("", encoding="utf-8")
+
+            with mock.patch.object(
+                constants,
+                "CONFIG_FILE",
+                str(config_path),
+            ), mock.patch.object(
+                constants,
+                "EXCLUDE_FILE",
+                str(exclude_path),
+            ), mock.patch.object(
+                config.messages,
+                "event_msg",
+            ), mock.patch.object(
+                config.messages,
+                "set_colors",
+            ):
+                environment = config.load_env()
+
+            self.assertEqual(environment["VRAM"], constants.DEFAULT_VRAM)
+            vram_lines = [
+                line
+                for line in config_path.read_text(encoding="utf-8").splitlines()
+                if line.startswith("VRAM=")
+            ]
+            self.assertEqual(
+                vram_lines,
+                [f'VRAM="{constants.DEFAULT_VRAM}"'],
             )
 
 

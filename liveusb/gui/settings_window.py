@@ -2,7 +2,7 @@
 
 from .gtkcompat import Gtk
 
-from .. import config
+from .. import config, constants
 
 LOCALES = [
     "C", "POSIX", "bokmal", "catalan", "croatian", "czech", "danish", "dansk",
@@ -38,6 +38,10 @@ def _select(combo, value, fallback_index=0):
             combo.set_active(i)
             return
     combo.set_active(fallback_index)
+
+
+def _get_vram_setting():
+    return config.get_config_str("VRAM=", constants.DEFAULT_VRAM)
 
 
 class SettingsWindow:
@@ -116,7 +120,7 @@ class SettingsWindow:
 
         grid.attach(Gtk.Label(label="Desktop Emulator Memory", xalign=0), 0, row, 1, 1)
         self.vram_combo = _combo(VRAM_SIZES)
-        _select(self.vram_combo, config.get_config_str("VRAM=", "256"))
+        _select(self.vram_combo, _get_vram_setting())
         self.vram_combo.connect("changed", self.on_vram_changed)
         grid.attach(self.vram_combo, 1, row, 1, 1)
         row += 1

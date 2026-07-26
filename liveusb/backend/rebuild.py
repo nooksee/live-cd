@@ -9,6 +9,9 @@ from datetime import date
 from . import mounts, chroot, run
 from .. import constants, messages
 
+_EFI_KERNEL_REFERENCE = b"vmlinuz.efi"
+_MEDIA_SCAN_CHUNK_SIZE = 64 * 1024
+
 
 def _grep_value(path, key):
     try:
@@ -24,6 +27,25 @@ def _grep_value(path, key):
 def _latest_glob(pattern):
     matches = sorted(glob.glob(pattern))
     return matches[-1] if matches else None
+
+
+def _media_references_vmlinuz_efi(root):
+    overlap_size = len(_EFI_KERNEL_REFERENCE) - 1
+    for path in _walk_files(root):
+        try:
+            with open(path, "rb") as fh:
+                overlap = b""
+                while True:
+                    chunk = fh.read(_MEDIA_SCAN_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    searchable = overlap + chunk
+                    if _EFI_KERNEL_REFERENCE in searchable:
+                        return True
+                    overlap = searchable[-overlap_size:]
+        except OSError:
+            continue
+    return False
 
 
 def run_rebuild(ctx):
@@ -148,7 +170,7 @@ def run_rebuild(ctx):
     messages.extra_info("Copying initrd", os.path.relpath(initrd_source, boot_dir))
     shutil.copyfile(initrd_source, os.path.join(casper_dir, "initrd.lz"))
 
-    uses_efi = any("vmlinuz.efi" in path for path in _walk_files(ctx.iso_dir))
+    uses_efi = _media_references_vmlinuz_efi(ctx.iso_dir)
     if uses_efi:
         messages.extra_info("Copying vmlinuz.efi", os.path.relpath(vmlinuz_source, boot_dir))
         shutil.copyfile(vmlinuz_source, os.path.join(casper_dir, "vmlinuz.efi"))

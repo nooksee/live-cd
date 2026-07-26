@@ -5,6 +5,7 @@ import subprocess
 from dataclasses import dataclass, field
 
 from .. import config
+from .. import constants
 from .. import messages
 
 
@@ -20,7 +21,7 @@ class Context:
     apt_helper: bool = True
     resolution: str = "1024x768"
     boot_files: bool = False
-    vram: str = "1024"
+    vram: str = constants.DEFAULT_VRAM
     compression: str = "xz"
     locales: str = "C"
     iso: str = ""

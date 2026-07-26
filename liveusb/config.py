@@ -123,7 +123,7 @@ def load_env():
         "APT_HELPER": "1",
         "RESOLUTION": "1024x768",
         "BOOT_FILES": "0",
-        "VRAM": "1024",
+        "VRAM": constants.DEFAULT_VRAM,
         "COMPRESSION": "xz",
         "LOCALES": "C",
         "ISO": "",

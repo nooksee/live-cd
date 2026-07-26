@@ -2,7 +2,7 @@
 
 import os
 
-from . import mounts, chroot
+from . import mounts, chroot, mount_session
 from .. import messages
 
 
@@ -27,12 +27,17 @@ def run_pkgm(ctx):
         messages.error("No supported package managers were detected!")
     messages.extra_info("Will run", pkgm)
 
-    mounts.allow_local_x_access()
-    mounts.mount_sys(ctx)
-    mounts.mount_dbus(ctx)
-    chroot.chroot_run(ctx, "apt-get", "install", "dbus", "-y", "-f")
-    chroot.chroot_run(ctx, "dbus-uuidgen", "--ensure")
-    chroot.chroot_run(ctx, pkgm)
-    mounts.umount_sys(ctx)
-    mounts.recursive_umount(ctx)
-    mounts.block_local_x_access()
+    with mount_session.MountSession(ctx) as session:
+        session.allow_local_x_access()
+        session.mount_sys()
+        session.mount_dbus()
+        chroot.chroot_run(
+            ctx,
+            "apt-get",
+            "install",
+            "dbus",
+            "-y",
+            "-f",
+        )
+        chroot.chroot_run(ctx, "dbus-uuidgen", "--ensure")
+        chroot.chroot_run(ctx, pkgm)

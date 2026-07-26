@@ -3,7 +3,7 @@
 import os
 import shutil
 
-from . import mounts, chroot
+from . import mounts, chroot, mount_session
 from .. import messages
 
 
@@ -20,10 +20,8 @@ def run_deb(ctx):
 
     shutil.copyfile(ctx.deb, os.path.join(ctx.fs_dir, "tmp/temp.deb"))
 
-    mounts.allow_local_x_access()
-    mounts.mount_sys(ctx)
-    chroot.chroot_run(ctx, "dpkg", "-i", "/tmp/temp.deb")
-    chroot.chroot_run(ctx, "apt-get", "install", "-f", "-y")
-    mounts.umount_sys(ctx)
-    mounts.recursive_umount(ctx)
-    mounts.block_local_x_access()
+    with mount_session.MountSession(ctx) as session:
+        session.allow_local_x_access()
+        session.mount_sys()
+        chroot.chroot_run(ctx, "dpkg", "-i", "/tmp/temp.deb")
+        chroot.chroot_run(ctx, "apt-get", "install", "-f", "-y")

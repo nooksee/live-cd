@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from datetime import date
 
-from . import mounts, chroot, run
+from . import mounts, chroot, mount_session, run
 from .. import constants, messages
 
 _EFI_KERNEL_REFERENCE = b"vmlinuz.efi"
@@ -149,23 +149,53 @@ def run_rebuild(ctx):
     initrd_source = _latest_glob(os.path.join(boot_dir, "initrd.img-*"))
     vmlinuz_source = _latest_glob(os.path.join(boot_dir, "vmlinuz-*"))
 
-    if not initrd_source or not vmlinuz_source or not os.path.exists(initrd_source) or not os.path.exists(vmlinuz_source):
-        mounts.mount_sys(ctx)
-        messages.info("Purging Kernels (if any)")
-        chroot.chroot_run(ctx, "apt-get", "purge", "--yes", "linux-image*", "linux-headers*", "-qq")
-        messages.info("Installing Kernel")
-        chroot.chroot_run(ctx, "apt-get", "install", "--yes", "linux-image-generic", "linux-headers-generic", "-qq")
-        mounts.umount_sys(ctx)
-        mounts.recursive_umount(ctx)
+    missing_kernel = (
+        not initrd_source
+        or not vmlinuz_source
+        or not os.path.exists(initrd_source)
+        or not os.path.exists(vmlinuz_source)
+    )
+    with mount_session.MountSession(ctx) as session:
+        session.mount_sys()
+        if missing_kernel:
+            messages.info("Purging Kernels (if any)")
+            chroot.chroot_run(
+                ctx,
+                "apt-get",
+                "purge",
+                "--yes",
+                "linux-image*",
+                "linux-headers*",
+                "-qq",
+            )
+            messages.info("Installing Kernel")
+            chroot.chroot_run(
+                ctx,
+                "apt-get",
+                "install",
+                "--yes",
+                "linux-image-generic",
+                "linux-headers-generic",
+                "-qq",
+            )
+        else:
+            messages.info("Updating kernel image")
+            chroot.chroot_run(
+                ctx,
+                "update-initramfs",
+                "-k",
+                "all",
+                "-t",
+                "-u",
+            )
 
-        initrd_source = _latest_glob(os.path.join(boot_dir, "initrd.img-*"))
-        vmlinuz_source = _latest_glob(os.path.join(boot_dir, "vmlinuz-*"))
-    else:
-        mounts.mount_sys(ctx)
-        messages.info("Updating kernel image")
-        chroot.chroot_run(ctx, "update-initramfs", "-k", "all", "-t", "-u")
-        mounts.umount_sys(ctx)
-        mounts.recursive_umount(ctx)
+    if missing_kernel:
+        initrd_source = _latest_glob(
+            os.path.join(boot_dir, "initrd.img-*")
+        )
+        vmlinuz_source = _latest_glob(
+            os.path.join(boot_dir, "vmlinuz-*")
+        )
 
     messages.extra_info("Copying initrd", os.path.relpath(initrd_source, boot_dir))
     shutil.copyfile(initrd_source, os.path.join(casper_dir, "initrd.lz"))

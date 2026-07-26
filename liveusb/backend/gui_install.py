@@ -1,6 +1,6 @@
 """Port of .hidden/scripts/gui: install a desktop environment into the FileSystem."""
 
-from . import mounts, chroot
+from . import mounts, chroot, mount_session
 from .. import messages
 
 DESKTOPS = {
@@ -30,10 +30,23 @@ def run_gui_install(ctx, choice=None):
             messages.warning("This is not an option!")
             choice = None
 
-    mounts.mount_sys(ctx)
-    mounts.mount_dbus(ctx)
-    chroot.chroot_run(ctx, "apt-get", "install", "dbus", "-f", "-y")
-    chroot.chroot_run(ctx, "dbus-uuidgen", "--ensure")
-    chroot.chroot_run(ctx, "apt-get", "install", "-y", *gui_packages.split(), "--no-install-recommends")
-    mounts.umount_sys(ctx)
-    mounts.recursive_umount(ctx)
+    with mount_session.MountSession(ctx) as session:
+        session.mount_sys()
+        session.mount_dbus()
+        chroot.chroot_run(
+            ctx,
+            "apt-get",
+            "install",
+            "dbus",
+            "-f",
+            "-y",
+        )
+        chroot.chroot_run(ctx, "dbus-uuidgen", "--ensure")
+        chroot.chroot_run(
+            ctx,
+            "apt-get",
+            "install",
+            "-y",
+            *gui_packages.split(),
+            "--no-install-recommends",
+        )

@@ -4,7 +4,7 @@ import os
 import shutil
 import stat
 
-from . import mounts, chroot
+from . import mounts, chroot, mount_session
 from .. import messages
 
 
@@ -21,10 +21,8 @@ def run_hook(ctx):
     st = os.stat(target)
     os.chmod(target, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    mounts.allow_local_x_access()
-    mounts.mount_sys(ctx)
-    mounts.mount_dbus(ctx)
-    chroot.chroot_run(ctx, "/tmp/HOOK")
-    mounts.umount_sys(ctx)
-    mounts.recursive_umount(ctx)
-    mounts.block_local_x_access()
+    with mount_session.MountSession(ctx) as session:
+        session.allow_local_x_access()
+        session.mount_sys()
+        session.mount_dbus()
+        chroot.chroot_run(ctx, "/tmp/HOOK")

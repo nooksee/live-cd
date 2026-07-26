@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import time
 
-from . import mounts, chroot
+from . import mounts, chroot, mount_session
 from .. import messages
 
 _PLACEHOLDER_RE = re.compile(r"%[a-zA-Z]")
@@ -64,25 +64,38 @@ def run_xnest(ctx):
     exec_args = [_PLACEHOLDER_RE.sub("", arg) for arg in shlex.split(exec_command)]
 
     messages.info("Starting virtual desktop")
-    xephyr = subprocess.Popen(["Xephyr", "-wr", "-ac", "-screen", ctx.resolution, ":9"])
-    time.sleep(1)
-
-    mounts.allow_local_x_access()
-    mounts.mount_sys(ctx)
-    mounts.mount_dbus(ctx)
-    chroot.chroot_run(ctx, "apt-get", "install", "dbus", "-y", "-f")
-    chroot.chroot_run(ctx, "dbus-uuidgen", "--ensure")
-    _chroot_run_with_env(ctx, {"DISPLAY": "localhost:9"}, exec_args)
-    mounts.umount_sys(ctx)
-    mounts.recursive_umount(ctx)
-    mounts.block_local_x_access()
-
-    messages.info("Stopping virtual desktop")
-    xephyr.terminate()
+    xephyr = subprocess.Popen(
+        [
+            "Xephyr",
+            "-wr",
+            "-ac",
+            "-screen",
+            ctx.resolution,
+            ":9",
+        ]
+    )
     try:
-        xephyr.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        xephyr.kill()
+        time.sleep(1)
+        with mount_session.MountSession(ctx) as session:
+            session.allow_local_x_access()
+            session.mount_sys()
+            session.mount_dbus()
+            chroot.chroot_run(
+                ctx,
+                "apt-get",
+                "install",
+                "dbus",
+                "-y",
+                "-f",
+            )
+            chroot.chroot_run(ctx, "dbus-uuidgen", "--ensure")
+            _chroot_run_with_env(
+                ctx,
+                {"DISPLAY": "localhost:9"},
+                exec_args,
+            )
+    finally:
+        _stop_xephyr(xephyr)
 
     messages.info("Removing some unwanted directories and files")
     root_dir = os.path.join(ctx.fs_dir, "root")
@@ -116,6 +129,22 @@ def run_xnest(ctx):
 
     messages.info("Adjusting display entries")
     _sed_replace_tree(skel_dir, "localhost:9.0", ":0.0")
+
+
+def _stop_xephyr(xephyr):
+    messages.info("Stopping virtual desktop")
+    try:
+        xephyr.terminate()
+    except OSError:
+        return
+    try:
+        xephyr.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            xephyr.kill()
+        except OSError:
+            return
+        xephyr.wait(timeout=5)
 
 
 def _chroot_run_with_env(ctx, env_vars, args):

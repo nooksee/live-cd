@@ -271,6 +271,128 @@ class ChrootTransactionTests(unittest.TestCase):
                 ] = _node_snapshot(path)
         return evidence
 
+    @staticmethod
+    def _remove_test_node(path):
+        path = str(path)
+        if not os.path.lexists(path):
+            return
+        if os.path.isdir(path) and not os.path.islink(path):
+            os.rmdir(path)
+        else:
+            os.unlink(path)
+
+    def _install_nonregular_replacement(self, path, kind):
+        self._remove_test_node(path)
+        if kind == "directory":
+            Path(path).mkdir()
+        elif kind == "symlink":
+            os.symlink("/alternate-package-node", str(path))
+        elif kind == "special":
+            os.mkfifo(str(path), 0o600)
+        else:
+            raise AssertionError(
+                f"Unknown replacement test kind: {kind}"
+            )
+
+    def _assert_normal_nonregular_replacement_rejected(self, kind):
+        service = self._seed_service("sbin/initctl")
+        transaction = self._transaction()
+        transaction.__enter__()
+        transaction.block_files((str(service),))
+        backup_path = Path(str(service) + ".blocked")
+        journal_path = Path(transaction.journal_path)
+        lock_path = Path(transaction.lock_path)
+        backup_before = _node_snapshot(backup_path)
+        lock_before = _node_snapshot(lock_path)
+        self._install_nonregular_replacement(service, kind)
+        replacement_before = _node_snapshot(service)
+
+        with self.assertRaises(TransactionCleanupError) as captured:
+            transaction.cleanup()
+
+        self.assertEqual(len(captured.exception.failures), 1)
+        self.assertIsInstance(
+            captured.exception.failures[0].error,
+            TransactionRecoveryError,
+        )
+        self.assertIn(
+            "not an lstat regular file",
+            str(captured.exception.failures[0].error),
+        )
+        self.assertEqual(_node_snapshot(service), replacement_before)
+        self.assertEqual(_node_snapshot(backup_path), backup_before)
+        self.assertEqual(_node_snapshot(lock_path), lock_before)
+        self.assertTrue(os.path.lexists(str(journal_path)))
+
+        self._remove_test_node(service)
+        self._write_file(
+            service,
+            b"valid replacement after operator correction\n",
+            0o755,
+        )
+        with mock.patch.object(messages, "warning"):
+            transaction.cleanup()
+
+        self.assertEqual(
+            service.read_bytes(),
+            b"valid replacement after operator correction\n",
+        )
+        self._assert_no_transaction_residue()
+
+    def _assert_stale_nonregular_replacement_rejected(self, kind):
+        self._seed_managed_nodes()
+        service = self._seed_service("sbin/initctl")
+        abandoned = self._transaction()
+        abandoned.__enter__()
+        abandoned.block_files((str(service),))
+        self._install_nonregular_replacement(service, kind)
+        backup_path = Path(str(service) + ".blocked")
+        journal_path = Path(abandoned.journal_path)
+        lock_path = Path(abandoned.lock_path)
+        evidence_before = {
+            "replacement": _node_snapshot(service),
+            "backup": _node_snapshot(backup_path),
+            "journal": _node_snapshot(journal_path),
+            "lock": _node_snapshot(lock_path),
+        }
+        self._simulate_process_crash(abandoned)
+        self.ctx.force_chroot = True
+
+        with self.assertRaisesRegex(
+            TransactionRecoveryError,
+            "not an lstat regular file",
+        ):
+            with self._transaction():
+                self.fail(
+                    "A nonregular replacement must fail closed"
+                )
+
+        self.assertEqual(
+            {
+                "replacement": _node_snapshot(service),
+                "backup": _node_snapshot(backup_path),
+                "journal": _node_snapshot(journal_path),
+                "lock": _node_snapshot(lock_path),
+            },
+            evidence_before,
+        )
+
+        self._remove_test_node(service)
+        self._write_file(
+            service,
+            b"valid replacement after stale-state review\n",
+            0o755,
+        )
+        with mock.patch.object(messages, "warning"):
+            with self._transaction():
+                pass
+
+        self.assertEqual(
+            service.read_bytes(),
+            b"valid replacement after stale-state review\n",
+        )
+        self._assert_no_transaction_residue()
+
     def test_success_restores_exact_managed_nodes_and_records_services(self):
         self._seed_managed_nodes()
         first_service = self._seed_service("sbin/initctl")
@@ -1211,6 +1333,525 @@ class ChrootTransactionTests(unittest.TestCase):
                 ["apt-get", "clean"],
             ],
         )
+        self._assert_no_transaction_residue()
+
+    def test_service_targets_are_validated_before_journal_mutation(self):
+        outside_directory = self.root / "outside"
+        outside_directory.mkdir()
+        escape_parent = self.fs_dir / "escape-parent"
+        os.symlink(str(outside_directory), str(escape_parent))
+        valid_service = self._seed_service(
+            "etc/init.d/valid-before-reserved"
+        )
+        valid_service_before = _node_snapshot(valid_service)
+
+        with self._transaction() as transaction:
+            journal_path = Path(transaction.journal_path)
+            transaction_backup = self.fs_dir / (
+                "sbin/example.liveusb-transaction-"
+                + str(transaction._token)
+            )
+            cases = (
+                (
+                    "outside FileSystem",
+                    outside_directory / "service",
+                    "escapes FileSystem",
+                ),
+                (
+                    "../ journal",
+                    self.fs_dir
+                    / ".."
+                    / ".liveusb-chroot-transaction.json",
+                    "escapes FileSystem",
+                ),
+                (
+                    "symlink-parent escape",
+                    escape_parent / "service",
+                    "parent escapes FileSystem",
+                ),
+                *tuple(
+                    (
+                        f"managed node {path.name}",
+                        path,
+                        "reserved service target",
+                    )
+                    for path in self._managed_paths()
+                ),
+                (
+                    "lock path",
+                    Path(transaction.lock_path),
+                    "reserved service target",
+                ),
+                (
+                    ".blocked path",
+                    self.fs_dir / "sbin/example.blocked",
+                    "reserved service target",
+                ),
+                (
+                    "transaction backup path",
+                    transaction_backup,
+                    "reserved service target",
+                ),
+            )
+
+            for label, target, expected_error in cases:
+                with self.subTest(label=label):
+                    journal_before = journal_path.read_bytes()
+                    with self.assertRaisesRegex(
+                        TransactionRecoveryError,
+                        expected_error,
+                    ):
+                        transaction.block_files((str(target),))
+                    self.assertEqual(
+                        journal_path.read_bytes(),
+                        journal_before,
+                    )
+
+            journal_before = journal_path.read_bytes()
+            with self.assertRaisesRegex(
+                TransactionRecoveryError,
+                "reserved service target",
+            ):
+                transaction.block_files(
+                    (
+                        str(valid_service),
+                        str(self.fs_dir / "etc/hosts"),
+                    )
+                )
+            self.assertEqual(
+                journal_path.read_bytes(),
+                journal_before,
+            )
+            self.assertEqual(
+                _node_snapshot(valid_service),
+                valid_service_before,
+            )
+            self.assertFalse(
+                os.path.lexists(str(valid_service) + ".blocked")
+            )
+
+        self._assert_no_transaction_residue()
+
+    def test_orphan_recovery_artifacts_are_rejected_without_lock(self):
+        final_journal = (
+            self.work_dir / ".liveusb-chroot-transaction.json"
+        )
+        pending_journal = self.work_dir / (
+            ".liveusb-chroot-transaction.json.pending-orphan"
+        )
+        blocked_path = self.fs_dir / "sbin/orphan.blocked"
+        transaction_backup = self.fs_dir / (
+            "etc/hosts.liveusb-transaction-" + ("a" * 32)
+        )
+        cases = (
+            ("final journal", final_journal, b"final evidence\n"),
+            ("pending journal", pending_journal, b"pending evidence\n"),
+            (".blocked file", blocked_path, b"blocked evidence\n"),
+            (
+                "transaction backup",
+                transaction_backup,
+                b"backup evidence\n",
+            ),
+        )
+
+        for label, path, content in cases:
+            with self.subTest(label=label):
+                self._write_file(path, content, 0o600)
+                evidence_before = self._tree_evidence_snapshot()
+                with self.assertRaises(TransactionRecoveryError):
+                    with self._transaction():
+                        self.fail(
+                            "Orphan recovery evidence must fail closed"
+                        )
+                self.assertEqual(
+                    self._tree_evidence_snapshot(),
+                    evidence_before,
+                )
+                self.assertFalse(
+                    os.path.lexists(
+                        str(self.fs_dir / "tmp/lock_chroot")
+                    )
+                )
+                os.unlink(str(path))
+
+        self._assert_no_transaction_residue()
+
+    def test_stale_blocked_file_observed_after_entry_fails_closed(self):
+        service = self._seed_service("sbin/initctl")
+        service_before = _node_snapshot(service)
+
+        with self._transaction() as transaction:
+            stale_backup = Path(str(service) + ".blocked")
+            self._write_file(
+                stale_backup,
+                b"stale blocked evidence\n",
+                0o600,
+            )
+            journal_path = Path(transaction.journal_path)
+            journal_before = journal_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                TransactionRecoveryError,
+                "Stale blocked-file backup",
+            ):
+                transaction.block_files((str(service),))
+
+            self.assertEqual(
+                journal_path.read_bytes(),
+                journal_before,
+            )
+            self.assertEqual(
+                stale_backup.read_bytes(),
+                b"stale blocked evidence\n",
+            )
+            os.unlink(str(stale_backup))
+
+        self.assertEqual(_node_snapshot(service), service_before)
+        self._assert_no_transaction_residue()
+
+    def test_pending_only_evidence_survives_unexpected_residue(self):
+        abandoned = self._transaction()
+        abandoned._ensure_lock_directory()
+        abandoned._create_new_lock()
+        lock_data = json.loads(
+            Path(abandoned.lock_path).read_text(encoding="utf-8")
+        )
+        pending_path = Path(
+            abandoned.journal_pending_prefix + "preserve-evidence"
+        )
+        pending_data = {
+            "managed": [],
+            "owner": {
+                "pid": lock_data["pid"],
+                "token": lock_data["token"],
+            },
+            "sequence": 1,
+            "services": [],
+            "version": 1,
+        }
+        pending_path.write_bytes(
+            abandoned._encode_json(pending_data)
+        )
+        residue_path = self.fs_dir / "sbin/unexpected.blocked"
+        self._write_file(
+            residue_path,
+            b"unexpected residue evidence\n",
+            0o600,
+        )
+        self._simulate_process_crash(abandoned)
+        evidence_before = self._tree_evidence_snapshot()
+        self.ctx.force_chroot = True
+
+        with self.assertRaisesRegex(
+            TransactionRecoveryError,
+            "Unjournaled transaction residue",
+        ):
+            with self._transaction():
+                self.fail(
+                    "Pending evidence with residue must fail closed"
+                )
+
+        self.assertEqual(
+            self._tree_evidence_snapshot(),
+            evidence_before,
+        )
+        self.assertEqual(
+            pending_path.read_bytes(),
+            abandoned._encode_json(pending_data),
+        )
+        self.assertEqual(
+            residue_path.read_bytes(),
+            b"unexpected residue evidence\n",
+        )
+
+    def test_unlocked_current_pid_metadata_does_not_veto_recovery(self):
+        abandoned = self._transaction()
+        abandoned._ensure_lock_directory()
+        abandoned._create_new_lock()
+        lock_path = Path(abandoned.lock_path)
+        lock_data = json.loads(
+            lock_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(lock_data["pid"], os.getpid())
+        self._simulate_process_crash(abandoned)
+        self.ctx.force_chroot = True
+
+        with mock.patch.object(
+            ChrootTransaction,
+            "_pid_is_live",
+            side_effect=AssertionError(
+                "PID inspection must not veto an acquired OS lock"
+            ),
+        ):
+            with self._transaction():
+                pass
+
+        self._assert_no_transaction_residue()
+
+    def test_normal_cleanup_rejects_directory_replacement(self):
+        self._assert_normal_nonregular_replacement_rejected(
+            "directory"
+        )
+
+    def test_normal_cleanup_rejects_alternate_symlink_replacement(self):
+        self._assert_normal_nonregular_replacement_rejected(
+            "symlink"
+        )
+
+    @unittest.skipUnless(
+        hasattr(os, "mkfifo"),
+        "FIFO nodes require POSIX os.mkfifo",
+    )
+    def test_normal_cleanup_rejects_special_node_replacement(self):
+        self._assert_normal_nonregular_replacement_rejected(
+            "special"
+        )
+
+    def test_stale_recovery_rejects_directory_replacement(self):
+        self._assert_stale_nonregular_replacement_rejected(
+            "directory"
+        )
+
+    def test_stale_recovery_rejects_alternate_symlink_replacement(self):
+        self._assert_stale_nonregular_replacement_rejected(
+            "symlink"
+        )
+
+    @unittest.skipUnless(
+        hasattr(os, "mkfifo"),
+        "FIFO nodes require POSIX os.mkfifo",
+    )
+    def test_stale_recovery_rejects_special_node_replacement(self):
+        self._assert_stale_nonregular_replacement_rejected(
+            "special"
+        )
+
+    def test_journal_removal_failure_is_retryable(self):
+        transaction = self._transaction()
+        transaction.__enter__()
+        journal_path = Path(transaction.journal_path)
+        lock_path = Path(transaction.lock_path)
+        real_unlink = transaction_module.os.unlink
+        failed_once = False
+
+        def fail_journal_removal_once(path):
+            nonlocal failed_once
+            if not failed_once and path == str(journal_path):
+                failed_once = True
+                raise OSError("simulated journal removal failure")
+            return real_unlink(path)
+
+        with mock.patch.object(
+            transaction_module.os,
+            "unlink",
+            side_effect=fail_journal_removal_once,
+        ):
+            with self.assertRaises(TransactionCleanupError) as captured:
+                transaction.cleanup()
+
+        self.assertTrue(failed_once)
+        self.assertEqual(len(captured.exception.failures), 1)
+        self.assertEqual(
+            captured.exception.failures[0].operation,
+            "remove_transaction_journal",
+        )
+        self.assertTrue(os.path.lexists(str(journal_path)))
+        self.assertTrue(os.path.lexists(str(lock_path)))
+
+        transaction.cleanup()
+        self._assert_no_transaction_residue()
+
+    def test_lock_identity_validation_failure_is_retryable(self):
+        transaction = self._transaction()
+        transaction.__enter__()
+        journal_path = Path(transaction.journal_path)
+        lock_path = Path(transaction.lock_path)
+        lock_before = _node_snapshot(lock_path)
+        real_lstat = transaction_module.os.lstat
+        failed_once = False
+        inactive_lock_checks = 0
+
+        def report_one_false_lock_identity(path):
+            nonlocal failed_once, inactive_lock_checks
+            stat_result = real_lstat(path)
+            if (
+                not failed_once
+                and str(path) == str(lock_path)
+                and not transaction._journal_active
+            ):
+                inactive_lock_checks += 1
+                if inactive_lock_checks == 2:
+                    failed_once = True
+                    return SimpleNamespace(
+                        st_dev=stat_result.st_dev,
+                        st_ino=stat_result.st_ino + 1,
+                        st_mode=stat_result.st_mode,
+                    )
+            return stat_result
+
+        with mock.patch.object(
+            transaction_module.os,
+            "lstat",
+            side_effect=report_one_false_lock_identity,
+        ):
+            with self.assertRaises(TransactionCleanupError) as captured:
+                transaction.cleanup()
+
+        self.assertTrue(failed_once)
+        self.assertEqual(len(captured.exception.failures), 1)
+        self.assertEqual(
+            captured.exception.failures[0].operation,
+            "release_lock",
+        )
+        self.assertFalse(os.path.lexists(str(journal_path)))
+        self.assertEqual(_node_snapshot(lock_path), lock_before)
+
+        transaction.cleanup()
+        self._assert_no_transaction_residue()
+
+    def test_created_lock_directory_cleanup_failure_is_retryable(self):
+        lock_directory = self.fs_dir / "tmp"
+        os.rmdir(str(lock_directory))
+        transaction = self._transaction()
+        transaction.__enter__()
+        real_rmdir = transaction_module.os.rmdir
+        failed_once = False
+
+        def fail_lock_directory_removal_once(path):
+            nonlocal failed_once
+            if (
+                not failed_once
+                and str(path) == str(lock_directory)
+            ):
+                failed_once = True
+                raise OSError(
+                    "simulated lock-directory removal failure"
+                )
+            return real_rmdir(path)
+
+        with mock.patch.object(
+            transaction_module.os,
+            "rmdir",
+            side_effect=fail_lock_directory_removal_once,
+        ):
+            with self.assertRaises(TransactionCleanupError) as captured:
+                transaction.cleanup()
+
+        self.assertTrue(failed_once)
+        self.assertEqual(len(captured.exception.failures), 1)
+        self.assertEqual(
+            captured.exception.failures[0].operation,
+            "remove_lock_directory",
+        )
+        self.assertTrue(lock_directory.is_dir())
+        self.assertEqual(tuple(lock_directory.iterdir()), tuple())
+
+        transaction.cleanup()
+        self.assertFalse(os.path.lexists(str(lock_directory)))
+        self._assert_no_transaction_residue()
+
+    @unittest.skipUnless(
+        hasattr(os, "fork"),
+        "Actual crash recovery requires POSIX os.fork",
+    )
+    def test_child_process_os_exit_is_recovered_without_residue(self):
+        self._seed_managed_nodes()
+        service = self._seed_service("sbin/initctl")
+        managed_before = {
+            path: _node_snapshot(path)
+            for path in self._managed_paths()
+        }
+        service_before = _node_snapshot(service)
+
+        child_pid = os.fork()
+        if child_pid == 0:
+            try:
+                transaction = self._transaction()
+                transaction.__enter__()
+                transaction.block_files((str(service),))
+            except BaseException:
+                os._exit(2)
+            os._exit(0)
+
+        _waited_pid, status = os.waitpid(child_pid, 0)
+        self.assertTrue(os.WIFEXITED(status))
+        self.assertEqual(os.WEXITSTATUS(status), 0)
+        interrupted_counts = self._transaction_residual_counts()
+        self.assertEqual(interrupted_counts["locks"], 1)
+        self.assertEqual(interrupted_counts["journals"], 1)
+        self.ctx.force_chroot = True
+
+        with self._transaction():
+            pass
+
+        for path, snapshot in managed_before.items():
+            self.assertEqual(_node_snapshot(path), snapshot)
+        self.assertEqual(_node_snapshot(service), service_before)
+        self._assert_no_transaction_residue()
+
+    @unittest.skipUnless(
+        hasattr(os, "fork"),
+        "Live OS-lock proof requires POSIX os.fork",
+    )
+    def test_live_child_os_lock_holder_is_rejected_by_flock(self):
+        self._seed_managed_nodes()
+        ready_read, ready_write = os.pipe()
+        release_read, release_write = os.pipe()
+        child_pid = os.fork()
+
+        if child_pid == 0:
+            os.close(ready_read)
+            os.close(release_write)
+            exit_code = 0
+            try:
+                transaction = self._transaction()
+                transaction.__enter__()
+                os.write(ready_write, b"1")
+                os.read(release_read, 1)
+                transaction.cleanup()
+            except BaseException:
+                exit_code = 2
+                try:
+                    os.write(ready_write, b"0")
+                except OSError:
+                    pass
+            finally:
+                os.close(ready_write)
+                os.close(release_read)
+            os._exit(exit_code)
+
+        os.close(ready_write)
+        os.close(release_read)
+        ready = os.read(ready_read, 1)
+        os.close(ready_read)
+        child_status = None
+        try:
+            self.assertEqual(ready, b"1")
+            evidence_before = self._tree_evidence_snapshot()
+            self.ctx.force_chroot = True
+            with self.assertRaisesRegex(
+                TransactionRecoveryError,
+                "ownership is active",
+            ):
+                with self._transaction():
+                    self.fail(
+                        "A live OS-lock holder must prevent takeover"
+                    )
+            self.assertEqual(
+                self._tree_evidence_snapshot(),
+                evidence_before,
+            )
+        finally:
+            try:
+                os.write(release_write, b"1")
+            except BrokenPipeError:
+                pass
+            os.close(release_write)
+            _waited_pid, child_status = os.waitpid(child_pid, 0)
+
+        self.assertIsNotNone(child_status)
+        self.assertTrue(os.WIFEXITED(child_status))
+        self.assertEqual(os.WEXITSTATUS(child_status), 0)
         self._assert_no_transaction_residue()
 
 

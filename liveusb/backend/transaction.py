@@ -164,6 +164,7 @@ class ChrootTransaction:
         }
         for target in targets:
             target = self._validated_absolute_path(target)
+            self._reject_reserved_service_target(target)
             if target in known_targets:
                 raise TransactionRecoveryError(
                     f"Duplicate service target is ambiguous: {target}"
@@ -173,8 +174,9 @@ class ChrootTransaction:
                 continue
             backup = target + ".blocked"
             if os.path.lexists(backup):
-                messages.warning(f"Blocking of {target} skipped!")
-                continue
+                raise TransactionRecoveryError(
+                    f"Stale blocked-file backup is ambiguous: {backup}"
+                )
             record = _BlockedFile(
                 original_path=target,
                 backup_path=backup,
@@ -307,10 +309,9 @@ class ChrootTransaction:
         try:
             lock_data = self._read_lock_descriptor(descriptor)
             self._validate_lock_data(lock_data)
-            if self._pid_is_live(lock_data["pid"]):
-                raise TransactionRecoveryError(
-                    "Chroot transaction owner is still live"
-                )
+            # Exclusive flock acquisition is the ownership authority.
+            # PID and token remain recovery identity and audit metadata;
+            # PID liveness cannot distinguish reuse from the recorded owner.
 
             journal_bundle = self._read_recovery_bundle(lock_data)
             self._bind_stale_lock(descriptor, lock_data)
@@ -320,15 +321,17 @@ class ChrootTransaction:
                     journal_bundle["managed"],
                     journal_bundle["services"],
                 )
+                self._validate_recovery_residue(
+                    journal_bundle["managed"],
+                    journal_bundle["services"],
+                )
+                self._validate_owned_lock_path()
                 pending_path = journal_bundle["pending_path"]
                 if pending_path is not None:
                     self._unlink_durable(pending_path)
 
                 journal_data = journal_bundle["journal"]
                 if journal_data is None:
-                    self._reject_unjournaled_residue(
-                        lock_data["token"]
-                    )
                     self._release_lock()
                     return
 
@@ -385,7 +388,6 @@ class ChrootTransaction:
         for record in services:
             backup_exists = os.path.lexists(record.backup_path)
             original_exists = os.path.lexists(record.original_path)
-            self._require_removable_node(record.original_path)
             if backup_exists and not self._node_matches(
                 record.backup_path,
                 record.original_state,
@@ -395,6 +397,10 @@ class ChrootTransaction:
                     f"{record.backup_path}"
                 )
             if record.stage in {"planned", "renamed"}:
+                if backup_exists:
+                    self._require_removable_node(
+                        record.original_path
+                    )
                 if (
                     not backup_exists
                     and not self._node_matches(
@@ -407,17 +413,23 @@ class ChrootTransaction:
                         f"{record.original_path}"
                     )
                 continue
+
+            owned_stub = self._is_owned_stub(record)
             if backup_exists:
                 if (
                     record.stage == "preserve_replacement"
                     and (
                         not original_exists
-                        or self._is_owned_stub(record)
+                        or owned_stub
                     )
                 ):
                     raise TransactionRecoveryError(
                         "Package replacement recovery is incomplete: "
                         f"{record.original_path}"
+                    )
+                if original_exists and not owned_stub:
+                    self._require_regular_package_replacement(
+                        record.original_path
                     )
                 continue
             if self._node_matches(
@@ -428,12 +440,33 @@ class ChrootTransaction:
             if (
                 record.stage == "preserve_replacement"
                 and original_exists
-                and not self._is_owned_stub(record)
+                and not owned_stub
             ):
+                self._require_regular_package_replacement(
+                    record.original_path
+                )
                 continue
             raise TransactionRecoveryError(
                 "Blocked-file recovery is incomplete: "
                 f"{record.original_path}"
+            )
+
+    def _validate_recovery_residue(self, managed, services):
+        expected_paths = {
+            state.backup_path
+            for state in managed
+            if state.backup_path is not None
+        }
+        expected_paths.update(
+            record.backup_path for record in services
+        )
+        unexpected_paths = sorted(
+            set(self._unjournaled_residue_paths()) - expected_paths
+        )
+        if unexpected_paths:
+            raise TransactionRecoveryError(
+                "Unjournaled transaction residue is ambiguous: "
+                + ", ".join(unexpected_paths)
             )
 
     def _open_stale_lock(self):
@@ -762,6 +795,22 @@ class ChrootTransaction:
 
         owned_stub = self._is_owned_stub(record)
         if backup_exists:
+            if record.stage == "preserve_replacement":
+                if not original_exists or owned_stub:
+                    raise TransactionRecoveryError(
+                        "Package replacement recovery is incomplete: "
+                        f"{record.original_path}"
+                    )
+                self._require_regular_package_replacement(
+                    record.original_path
+                )
+                messages.warning(
+                    f"{record.original_path} has been updated, "
+                    "removing blocked file!"
+                )
+                self._unlink_durable(record.backup_path)
+                return
+
             if not original_exists or owned_stub:
                 self._remove_node_durable(record.original_path)
                 self._rename_durable(
@@ -770,16 +819,18 @@ class ChrootTransaction:
                 )
                 return
 
-            if record.stage != "preserve_replacement":
-                previous_stage = record.stage
-                previous_sequence = self._journal_sequence
-                record.stage = "preserve_replacement"
-                try:
-                    self._persist_journal()
-                except BaseException:
-                    if self._journal_sequence == previous_sequence:
-                        record.stage = previous_stage
-                    raise
+            self._require_regular_package_replacement(
+                record.original_path
+            )
+            previous_stage = record.stage
+            previous_sequence = self._journal_sequence
+            record.stage = "preserve_replacement"
+            try:
+                self._persist_journal()
+            except BaseException:
+                if self._journal_sequence == previous_sequence:
+                    record.stage = previous_stage
+                raise
             messages.warning(
                 f"{record.original_path} has been updated, "
                 "removing blocked file!"
@@ -797,11 +848,28 @@ class ChrootTransaction:
             and original_exists
             and not owned_stub
         ):
+            self._require_regular_package_replacement(
+                record.original_path
+            )
             return
 
         raise TransactionRecoveryError(
             f"Blocked-file recovery is incomplete: {record.original_path}"
         )
+
+    @staticmethod
+    def _require_regular_package_replacement(path):
+        try:
+            stat_result = os.lstat(path)
+        except FileNotFoundError as error:
+            raise TransactionRecoveryError(
+                f"Package replacement is absent: {path}"
+            ) from error
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise TransactionRecoveryError(
+                "Package replacement is not an lstat regular file: "
+                f"{path}"
+            )
 
     def _is_owned_stub(self, record):
         if not os.path.islink(record.original_path):
@@ -934,11 +1002,17 @@ class ChrootTransaction:
         self._journal_sequence = 0
 
     def _release_lock(self):
-        if not os.path.lexists(self.lock_path):
-            self._close_lock_descriptor()
-            self._clear_lock_state()
-            return
+        self._validate_owned_lock_path()
+        os.unlink(self.lock_path)
+        self._fsync_directory(self.lock_dir)
+        self._close_lock_descriptor()
+        self._clear_lock_state()
 
+    def _validate_owned_lock_path(self):
+        if not os.path.lexists(self.lock_path):
+            raise TransactionRecoveryError(
+                f"Chroot lock ownership changed: {self.lock_path}"
+            )
         stat_result = os.lstat(self.lock_path)
         current_identity = (
             stat_result.st_dev,
@@ -963,11 +1037,6 @@ class ChrootTransaction:
             raise TransactionRecoveryError(
                 f"Chroot lock token changed: {self.lock_path}"
             )
-
-        os.unlink(self.lock_path)
-        self._fsync_directory(self.lock_dir)
-        self._close_lock_descriptor()
-        self._clear_lock_state()
 
     def _clear_lock_state(self):
         self._lock_owned = False
@@ -1179,6 +1248,7 @@ class ChrootTransaction:
                 "Service journal record is invalid"
             )
         path = self._absolute_relative_path(record["path"])
+        self._reject_reserved_service_target(path)
         backup_path = self._absolute_relative_path(record["backup"])
         if backup_path != path + ".blocked":
             raise TransactionRecoveryError(
@@ -1524,6 +1594,28 @@ class ChrootTransaction:
                 f"Transaction parent escapes FileSystem: {path}"
             )
         return absolute
+
+    def _reject_reserved_service_target(self, path):
+        managed_paths = {
+            os.path.join(self.fs_dir, relative_path)
+            for relative_path in _MANAGED_RELATIVE_PATHS
+        }
+        if path in managed_paths or path == self.lock_path:
+            raise TransactionRecoveryError(
+                f"Transaction-reserved service target: {path}"
+            )
+        relative_parts = os.path.relpath(
+            path,
+            self.fs_dir,
+        ).split(os.sep)
+        if any(
+            part.endswith(".blocked")
+            or ".liveusb-transaction-" in part
+            for part in relative_parts
+        ):
+            raise TransactionRecoveryError(
+                f"Transaction-reserved service target: {path}"
+            )
 
     def _pending_journal_paths(self):
         parent = os.path.dirname(self.journal_path)

@@ -120,10 +120,17 @@ def main(argv=None):
         return 0
 
     informational_flags = {"-v", "--version", "-h", "--help"}
-    if any(arg not in informational_flags for arg in argv):
-        # Operational and error paths retain the original up-front config
-        # load. Pure help and version requests remain read-only and do not
-        # require permission to create /etc/live-usb.
+    valid_flags = informational_flags | set(FLAG_TO_ACTION)
+    invalid_args = [arg for arg in argv if arg not in valid_flags]
+    if invalid_args:
+        for arg in invalid_args:
+            messages.extra_error_no_exit("unrecognised argument", arg)
+        return 2
+
+    if any(arg in FLAG_TO_ACTION for arg in argv):
+        # Operational requests retain the original up-front config load.
+        # Pure help, version, and rejected requests remain read-only and do
+        # not require permission to create /etc/live-usb.
         config.load_env()
 
     ran_something = False
@@ -139,7 +146,7 @@ def main(argv=None):
             ran_something = True
         else:
             messages.extra_error_no_exit("unrecognised argument", arg)
-            ran_something = True
+            return 2
 
     return 0 if ran_something else 1
 

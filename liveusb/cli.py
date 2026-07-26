@@ -41,9 +41,9 @@ LiveUSB Creator 3 ({__version__}) - Python port
 
 Links:
 
-  Homepage: https://github.com/fluxer/Customizer
-  Wiki: https://github.com/fluxer/Customizer/wiki
-  Issues: https://github.com/fluxer/Customizer/issues
+  Homepage: https://github.com/nooksee/live-usb
+  Documentation: https://github.com/nooksee/live-usb#readme
+  Issues: https://github.com/nooksee/live-usb/issues
 
 
 Credits:
@@ -126,15 +126,16 @@ def root_it(action):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
 
-    # Mirrors live-cd.sh sourcing /etc/{common,default} up front (now
-    # /etc/live-usb/{common,default}), so every message (including the very
-    # first one) respects MESSAGES_COLORS.
-    config.ensure_config_exists()
-    config.load_env()
-
     if not argv:
         print(USAGE)
         return 0
+
+    informational_flags = {"-v", "--version", "-h", "--help"}
+    if any(arg not in informational_flags for arg in argv):
+        # Operational and error paths retain the original up-front config
+        # load. Pure help and version requests remain read-only and do not
+        # require permission to create /etc/live-usb.
+        config.load_env()
 
     ran_something = False
     for arg in argv:

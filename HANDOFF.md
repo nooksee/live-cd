@@ -307,6 +307,17 @@ Keep this list current — it's how the two implementations stay comparable.
    Nothing exercises this path in `py_compile` or the CLI smoke test, which
    is why it wasn't caught immediately. Fixed by removing the now-redundant
    extra `pardir` hop.
+7. **Current support links follow the current project identity.** The
+   inherited CLI version text linked to the historical `fluxer/Customizer`
+   home, wiki, and issue tracker. It now points to `nooksee/live-usb`, its
+   README, and its issue tracker. Customizer copyright and license attribution
+   remain intact in the README and GUI license window.
+8. **Informational CLI requests do not initialize privileged configuration.**
+   The initial Python port loaded `/etc/live-usb` before argument dispatch,
+   which made no-argument usage, `--help`, and `--version` attempt privileged
+   writes when the configuration was absent. Those informational paths now
+   remain read-only. Operational and argument-error paths retain the up-front
+   configuration load used by the port.
 
 ---
 

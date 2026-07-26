@@ -18,6 +18,11 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
+The Customizer notice above records the GPL-licensed upstream lineage inherited
+by LiveCD Creator and, through it, LiveUSB Creator. Customizer is not the
+current project name or support destination. The current project home is
+<https://github.com/nooksee/live-usb>.
+
 An advanced LiveUSB customization and remastering tool. With it, you can build your own Ubuntu based remix using Ubuntu Mini Remix, Ubuntu or its derivatives from an ISO image.
 
 This is the Python implementation of LiveUSB Creator (GTK3/PyGObject GUI +

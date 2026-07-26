@@ -1,5 +1,6 @@
 # LiveUSB Creator 3
 # Copyright (C) 2012-2014  Kevin Atwood
+# Copyright (C) 2026  Kevin Thomas
 # 
 # Customizer - Advanced LiveCD Remastering Tool
 # Copyright (C) 2010-2013  Ivailo Monev
@@ -107,6 +108,13 @@ not been verified.
 
 ## Credits
 
+Kevin Thomas 'nooksee' (project creator, product owner, current maintainer)
+
+Current AI collaboration identities, roles, and lifecycle responsibilities
+are recorded in [CONTRIBUTORS.md](CONTRIBUTORS.md).
+
+Historical credits:
+
 Kevin Atwood 'nooksee' (code developer) `admin@nooksee.com`
 
 Ivailo Monev 'SmiL3y' (code developer) `xakepa10@gmail.com`
@@ -124,7 +132,10 @@ Ayman 'aymanim' (typo, spellcheck)
 
 ## Legal
 
-The GNU General Public License version 2 (GPLv2)
+The GNU General Public License version 2 or later (`GPL-2.0-or-later`).
+See [LICENSE](LICENSE).
+
+Copyright (C) 2026 Kevin Thomas
 
 Copyright (C) 2010-2014 Kevin Atwood
 

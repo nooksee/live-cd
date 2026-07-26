@@ -3,6 +3,25 @@
 An Ubuntu LiveUSB remastering tool, implemented in Python (GTK3/PyGObject GUI
 + Python backend).
 
+## Project stewardship
+
+Read `CONTRIBUTORS.md` for current ownership, collaboration identities,
+lifecycle roles, attribution practice, and license continuity.
+
+- Kevin Thomas is the project creator, product owner, current maintainer, and
+  final acceptance authority.
+- George Prime is the OpenAI Codex AI project steward and orchestration lead.
+- Claude Devens is the project-facing Anthropic Claude AI architecture and
+  review collaborator.
+- Jacob Codex is the OpenAI Codex AI implementation and verification
+  collaborator, continuing the transposed OSAI III implementation role.
+
+One active writer owns each assigned surface. Claude Devens should prioritize
+behavioral recovery, architectural challenge, adversarial review, failure
+analysis, and documentation unless explicitly assigned a disjoint
+implementation lane. AI attribution belongs in contributor, commit, handoff,
+review, and release records rather than repeated source-line watermarks.
+
 The project originally shipped as LiveCD Creator: a Gambas3 GUI backed by
 Bash scripts. That implementation (`.src/`, `.hidden/`) was retired from
 this repository on 2026-07-25 at Kevin's explicit request and archived,

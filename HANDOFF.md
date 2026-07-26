@@ -4,6 +4,13 @@ Written at the end of the porting session, for whoever picks this up next
 (human or assistant). It covers what was built, what was actually verified,
 where the bodies are buried, and what to do first.
 
+**2026-07-26 lifecycle update:** Kevin Thomas established the current
+LiveUSB Creator work as a new product lifecycle carrying forward the existing
+GPL license, historical lineage, and contributor notices. George Prime,
+Claude Devens, and Jacob Codex now have explicit AI collaboration identities
+and lifecycle roles. See `CONTRIBUTORS.md`. This changes historical credit
+and license obligations `0` times.
+
 **2026-07-25 update:** the original Gambas3 GUI (`.src/`) and Bash backend
 (`.hidden/`) that this was ported from have been retired from this
 repository at Kevin's request and archived, verified byte-identical, to

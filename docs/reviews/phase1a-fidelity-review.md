@@ -27,8 +27,8 @@ review.
 | Shared `KEY=value` configuration behavior is retained through one Python parser. | Preserved | Characterized by Phase 1A tests. |
 | Python exceptions replace shell-wide halt-on-error behavior for declared application errors. | Preserved with adapted mechanism | Additional injected failure tests remain required. |
 | The original `base_installable` work-directory path defect remains present and documented in source. | Confirmed inherited defect | Open. |
-| EFI output selection searches filenames for `vmlinuz.efi`, while the original searched file contents across the media tree. | Confirmed Python-introduced defect | Open and release-blocking for fidelity. |
-| The original default VRAM value is `2048`; the translated default is `1024`. | Confirmed Python-introduced defect | Open. |
+| EFI output selection searches filenames for `vmlinuz.efi`, while the original searched file contents across the media tree. | Confirmed Python-introduced defect | Resolved by commit `93a1d9e` with six focused cases. |
+| The original default VRAM value is `2048`; the translated default is `1024`. | Confirmed Python-introduced defect | Resolved by commit `93a1d9e` across four default consumers. |
 | Unknown arguments reached configuration initialization before rejection. | Confirmed Python-introduced defect | Resolved by commit `877036d`. |
 | Rebuild checksum records are sorted, while the original used filesystem traversal order. | Behavioral divergence | Accepted as deterministic behavior with a comparison caveat. |
 | Physical-media checksum records use absolute paths and unsorted traversal, unlike the original relative-path form. | Confirmed divergence | Open, outside the first no-change ISO gate. |
@@ -87,7 +87,7 @@ Do not compare the rebuilt `md5sum.txt` byte-for-byte with an original rebuild.
 The implementations order records differently. Compare the set of
 path-and-hash records or compare each payload file independently.
 
-## Ranked risks
+## Ranked risks at review time
 
 1. Failure-unsafe chroot, mount, lock, and blocked-file lifecycle.
 2. Incorrect EFI kernel-name detection.

@@ -61,6 +61,16 @@ Accepted Phase 1A baseline:
   effects;
 - original scripts and Python backend modules compared: `11/11` and `13/13`.
 
+Accepted Phase 1B baseline:
+
+- fidelity correction commit `93a1d9e`;
+- canonical VRAM default consumers: `4/4`;
+- bounded EFI-content cases: `6/6`;
+- unit tests with GUI support: `26/26`;
+- core-only unit tests: `25` pass and `1` expected GUI skip;
+- transaction review source coverage: `18/18`;
+- transaction failure cases and invariant categories: `11` and `6/6`.
+
 Work:
 
 1. Extend the accepted characterization baseline beyond configuration
@@ -69,8 +79,10 @@ Work:
 2. Isolate subprocess execution enough to inspect and test command plans.
 3. Add dependency, privilege, disk-space, media-layout, and workspace
    preflight reporting.
-4. Make mount, chroot, lock, temporary-file, and blocked-file cleanup
-   deterministic under success and injected failure.
+4. Implement the accepted two-wave transaction contract from
+   `docs/reviews/phase1b-transaction-safety.md`: first chroot-internal state,
+   then caller-level mounts and X access. Prove deterministic cleanup under
+   success and injected failure.
 5. Correct remaining launch and argument-handling failures. Full argument
    prevalidation is complete.
 6. Execute the legacy extract and no-change rebuild in a bounded workspace.

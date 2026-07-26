@@ -21,12 +21,14 @@ extract → no-change rebuild → QEMU boot cycle promotes the project to
 ## Verified baseline
 
 - Python source files passing syntax and Python 3.8 grammar validation:
-  `39/39`.
-- Importable discovered modules: `39/39`.
+  `40/40`.
+- Importable discovered modules: `40/40`.
 - CLI help and version paths returning successfully: `2/2`.
-- Current tracked test modules: `4`.
-- Phase 1A unit tests passing: `15/15`.
-- Phase 1A process smokes passing: `3/3`.
+- Current tracked test modules: `5`.
+- Current unit tests passing with GUI support installed: `26/26`.
+- Core-only unit tests passing without optional PyGObject: `25`, with the one
+  GUI-specific assertion skipped.
+- Current process smokes passing: `3/3`.
 - Successful remaster cycles produced by the Python implementation: `0`.
 - Successful QEMU boots of Python-generated media: `0`.
 - Real-desktop GUI acceptance passes: `0`.
@@ -55,6 +57,29 @@ four other behavioral divergences, and four untested risk classes. The
 accepted findings and legacy acceptance caveat are recorded in
 `docs/reviews/phase1a-fidelity-review.md`.
 
+## Phase 1B evidence
+
+Commit `93a1d9e` establishes one canonical VRAM default of `2048` across the
+configuration, backend context, and GUI fallback paths. It also replaces EFI
+kernel-name selection by pathname with a bounded, overlap-safe content scan
+that matches the original case-sensitive behavior and continues past read
+failures.
+
+The new tests cover:
+
+- all four VRAM default consumers;
+- positive, negative, nested, misleading-filename, read-failure, and
+  chunk-boundary EFI cases;
+- GUI-present and CLI-only dependency environments.
+
+Claude Devens completed a read-only transaction-safety review covering planned
+files `18/18`, failure-injection cases `11`, and required invariant categories
+`6/6`. George Prime accepted the evidence with two design corrections:
+pre-existing host files must be restored exactly, and caller-level mount and
+X-access safety requires explicit caller migration rather than zero call-site
+changes. The accepted contract is recorded in
+`docs/reviews/phase1b-transaction-safety.md`.
+
 ## Media evidence
 
 The known 2015 `ubuntuDE` ISO matches the translated engine's assumptions:
@@ -82,11 +107,7 @@ The current engine therefore cannot claim modern Ubuntu media support.
 3. Mount and chroot cleanup are not transaction-safe across every failure.
 4. Operational privilege handling still reflects the older root-process
    model.
-5. EFI kernel naming detection searches filenames where the original searched
-   media contents, which can select the wrong output kernel name.
-6. The translated default VRAM value is `1024`, while the original default is
-   `2048`.
-7. The GUI has not completed real-desktop product acceptance.
+5. The GUI has not completed real-desktop product acceptance.
 
 ## Current acceptance gate
 
@@ -100,4 +121,6 @@ See `ROADMAP.md` for scope, team lanes, exclusions, and later phases. See
 `docs/history/python-port.md` only for historical
 translation mapping, prior verification evidence, and the inherited risk
 register. See `docs/reviews/phase1a-fidelity-review.md` for the
-accepted behavioral comparison and checksum-comparison caveat.
+accepted behavioral comparison and checksum-comparison caveat. See
+`docs/reviews/phase1b-transaction-safety.md` for the accepted cleanup
+contract and implementation boundaries.

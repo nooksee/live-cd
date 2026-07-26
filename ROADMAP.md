@@ -71,6 +71,17 @@ Accepted Phase 1B baseline:
 - transaction review source coverage: `18/18`;
 - transaction failure cases and invariant categories: `11` and `6/6`.
 
+Accepted Phase 1C-1 baseline:
+
+- implementation commits `47805d1`, `cc05ad5`, and `ed9aaba`;
+- focused chroot-transaction tests: `43/43`;
+- complete GUI-enabled suite: `69/69`;
+- core-only suite: `68` pass and `1` expected GUI skip;
+- syntax and Python 3.8 grammar validation: `42/42` and `42/42`;
+- import and process-smoke validation: `36/36` and `4/4`;
+- actual child-process crash and live-lock proofs: `2/2`;
+- post-recovery residue categories: `0/0/0/0/0/0`.
+
 Work:
 
 1. Extend the accepted characterization baseline beyond configuration
@@ -79,10 +90,10 @@ Work:
 2. Isolate subprocess execution enough to inspect and test command plans.
 3. Add dependency, privilege, disk-space, media-layout, and workspace
    preflight reporting.
-4. Implement the accepted two-wave transaction contract from
-   `docs/reviews/phase1b-transaction-safety.md`: first chroot-internal state,
-   then caller-level mounts and X access. Prove deterministic cleanup under
-   success and injected failure.
+4. Complete Wave 1C-2 of the accepted transaction contract from
+   `docs/reviews/phase1b-transaction-safety.md`: caller-level mounts and X
+   access. Wave 1C-1 chroot-internal state is accepted in
+   `docs/reviews/phase1c1-chroot-transaction-acceptance.md`.
 5. Correct remaining launch and argument-handling failures. Full argument
    prevalidation is complete.
 6. Execute the legacy extract and no-change rebuild in a bounded workspace.

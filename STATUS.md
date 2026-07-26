@@ -21,14 +21,13 @@ extract → no-change rebuild → QEMU boot cycle promotes the project to
 ## Verified baseline
 
 - Python source files passing syntax and Python 3.8 grammar validation:
-  `40/40`.
-- Importable discovered modules: `40/40`.
-- CLI help and version paths returning successfully: `2/2`.
+  `42/42`.
+- Importable product modules: `36/36`.
+- Harmless CLI process smokes returning expected statuses: `4/4`.
 - Current tracked test modules: `5`.
-- Current unit tests passing with GUI support installed: `26/26`.
-- Core-only unit tests passing without optional PyGObject: `25`, with the one
+- Current unit tests passing with GUI support installed: `69/69`.
+- Core-only unit tests passing without optional PyGObject: `68`, with the one
   GUI-specific assertion skipped.
-- Current process smokes passing: `3/3`.
 - Successful remaster cycles produced by the Python implementation: `0`.
 - Successful QEMU boots of Python-generated media: `0`.
 - Real-desktop GUI acceptance passes: `0`.
@@ -80,6 +79,30 @@ X-access safety requires explicit caller migration rather than zero call-site
 changes. The accepted contract is recorded in
 `docs/reviews/phase1b-transaction-safety.md`.
 
+## Phase 1C-1 evidence
+
+Commits `47805d1`, `cc05ad5`, and `ed9aaba` implement and harden the
+chroot-internal transaction boundary. The accepted implementation provides:
+
+- exact restoration for `hosts`, `resolv.conf`, `debian_chroot`, and `mtab`;
+- an OS-held lock with persisted PID and token identity;
+- an external, atomically replaced recovery journal;
+- stale-transaction recovery before replacement ownership begins;
+- explicit blocked-file stages and fail-closed replacement classification;
+- ordered cleanup findings with primary-error chaining;
+- reserved-path, path-confinement, orphan-evidence, and retry protection.
+
+Focused transaction tests pass `43/43`. Actual child-process crash recovery
+and live-lock rejection pass `2/2`. Post-recovery backups, journals, locks,
+blocked files, transaction symlinks, and transaction-created lock directories
+are `0/0/0/0/0/0`.
+
+The implementation invokes real root, mount, chroot, package, network, ISO,
+QEMU, and GUI operations `0` times during this acceptance. Native Python 3.8
+execution and non-POSIX operation remain untested or unsupported. The
+acceptance record is
+`docs/reviews/phase1c1-chroot-transaction-acceptance.md`.
+
 ## Media evidence
 
 The known 2015 `ubuntuDE` ISO matches the translated engine's assumptions:
@@ -100,11 +123,12 @@ The current engine therefore cannot claim modern Ubuntu media support.
 
 ## Immediate blockers
 
-1. Characterization coverage does not yet include media recognition, command
-   construction, or injected transaction failures.
+1. Characterization coverage does not yet include media recognition or broad
+   command construction.
 2. Extract and rebuild remain hard-wired to the older single-SquashFS and
    `isolinux` media layout.
-3. Mount and chroot cleanup are not transaction-safe across every failure.
+3. Caller-level mount cleanup and host X-access reversal are not yet governed
+   by the accepted operation-session transaction.
 4. Operational privilege handling still reflects the older root-process
    model.
 5. The GUI has not completed real-desktop product acceptance.
@@ -123,4 +147,6 @@ translation mapping, prior verification evidence, and the inherited risk
 register. See `docs/reviews/phase1a-fidelity-review.md` for the
 accepted behavioral comparison and checksum-comparison caveat. See
 `docs/reviews/phase1b-transaction-safety.md` for the accepted cleanup
-contract and implementation boundaries.
+contract and implementation boundaries. See
+`docs/reviews/phase1c1-chroot-transaction-acceptance.md` for the accepted
+chroot-internal transaction evidence and remaining Wave 1C-2 boundary.

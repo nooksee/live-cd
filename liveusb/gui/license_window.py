@@ -2,7 +2,8 @@
 
 from .gtkcompat import Gtk
 
-LICENSE_TEXT = """LiveUSB Creator 3
+LICENSE_TEXT = """LiveUSB Creator
+Copyright (C) 2026  Kevin Thomas
 Copyright (C) 2012-2014  Kevin Atwood
 
 Customizer

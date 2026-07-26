@@ -32,9 +32,10 @@ was renamed from LiveCD to LiveUSB the same day, also at Kevin's explicit
 request. There is no longer a second implementation to keep in sync
 against; this repository is the sole reference.
 
-Read `HANDOFF.md` before working on this code. It has the architecture map
-(including the mapping from the retired original's scripts/forms to their
-Python counterparts), the risk register, and a concrete first-session plan.
+Read `STATUS.md`, `ROADMAP.md`, and `CONTRIBUTORS.md` before material work.
+The dated `docs/history/python-port-handoff-20260725.md` preserves the
+architecture map, including the mapping from the retired original's
+scripts/forms to their Python counterparts, and the original risk register.
 **The port has never been run against a real ISO** — treat the first real
 remastering run as the actual acceptance test.
 
@@ -48,16 +49,19 @@ remastering run as the actual acceptance test.
    convention, not this project's own naming, and must stay byte-compatible.
    The tool's *own* config directory, by contrast, is deliberately
    `/etc/live-usb` now (was `/etc/live-cd` before the 2026-07-25 rename) —
-   see `HANDOFF.md` §7 item 5. An existing `/etc/live-cd` installation from
-   the original LiveCD Creator is **not** picked up automatically; there is
-   no migration path by design, since the port has never shipped and there
-   is no real install in the field to protect.
+   see `docs/history/python-port-handoff-20260725.md` §7 item 5. An existing
+   `/etc/live-cd` installation from the original LiveCD Creator is **not**
+   picked up automatically; there is no migration path by design, since the
+   port has never shipped and there is no real install in the field to
+   protect.
 2. **Deliberate divergences get documented.** If you fix a bug or change
    behaviour relative to what the original Bash/Gambas implementation did
-   (see `HANDOFF.md` §7, "Deliberate divergences from the original"), record
-   it there. The original is gone from the repo, but its behaviour is still
-   the compatibility baseline for on-disk state (inside the target
-   filesystem — not this tool's own config path, per constraint 1).
+   (see the historical handoff §7, "Deliberate divergences from the
+   original"), record the current decision in `STATUS.md` or a current design
+   document and preserve the historical file unchanged. The original is gone
+   from the repo, but its behaviour is still the compatibility baseline for
+   on-disk state inside the target filesystem, not this tool's own config
+   path per constraint 1.
 
 ## Environment facts
 
@@ -65,7 +69,7 @@ remastering run as the actual acceptance test.
 - Real end-to-end testing needs an Ubuntu ISO plus `unsquashfs`, `mksquashfs`,
   `rsync`, `genisoimage`, `qemu-system-x86_64`, `Xephyr`.
 - The GUI needs PyGObject + GTK3 (`gir1.2-gtk-3.0`). It can be smoke-tested
-  headlessly under Xvfb — recipe in `HANDOFF.md`.
+  headlessly under Xvfb using the recipe in the historical handoff.
 - Targets Python 3.8+, stdlib only apart from PyGObject for the GUI.
 
 ## Commands
@@ -83,4 +87,4 @@ bin/live-usb-gui
 ```
 
 There is no test suite yet. Adding one is the single highest-value
-contribution — see `HANDOFF.md`.
+contribution and the first implementation objective in `ROADMAP.md`.

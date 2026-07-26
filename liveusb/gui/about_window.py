@@ -17,7 +17,7 @@ class AboutWindow:
         self.window.add(box)
 
         title = Gtk.Label()
-        title.set_markup(f"<span size='xx-large' weight='bold'>LiveUSB Creator 3</span>")
+        title.set_markup("<span size='xx-large' weight='bold'>LiveUSB Creator</span>")
         box.pack_start(title, False, False, 0)
 
         icon_path = resources.app_icon_path()
@@ -33,7 +33,7 @@ class AboutWindow:
         label.set_justify(Gtk.Justification.CENTER)
         box.pack_start(label, False, False, 0)
 
-        version_label = Gtk.Label(label=f"Python port {__version__}")
+        version_label = Gtk.Label(label=f"Development version {__version__}")
         box.pack_start(version_label, False, False, 0)
 
         close_btn = Gtk.Button(label="Close")

@@ -37,7 +37,9 @@ USAGE = """
 """
 
 VERSION_TEXT = f"""
-LiveUSB Creator 3 ({__version__}) - Python port
+LiveUSB Creator {__version__}
+
+Development status: pre-alpha
 
 Links:
 
@@ -46,27 +48,14 @@ Links:
   Issues: https://github.com/nooksee/live-usb/issues
 
 
-Credits:
+Project creator and maintainer:
+  Kevin Thomas (nooksee)
 
-  Main developer:
-    Kevin Atwood (a.k.a nooksee)
-    <kevin@nooksee.com>
+Historical and AI collaboration credits:
+  https://github.com/nooksee/live-usb/blob/after-hours/python-modernization/CONTRIBUTORS.md
 
-  Main developer:
-    Ivailo Monev (a.k.a SmiL3y)
-    <xakepa10@gmail.com>
-
-  PPA maintainer:
-    Michal Glowienka (a.k.a. eloaders)
-    <eloaders@yahoo.com>
-
-  Documentation:
-    Mubiin Kimura (a.k.a. clearkimura)
-    <clearkimura@gmail.com>
-
-  Gambas3 port:
-    Thiago Abreu (a.k.a thiagoabreu)
-    <thiagoa7@gmail.com>
+License:
+  GPL-2.0-or-later
 """
 
 ACTIONS = {

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "liveusb-creator"
-version = "3.13.57"
-description = "LiveUSB Creator 3 - advanced LiveUSB customization and remastering tool (Python port)"
+dynamic = ["version"]
+description = "Advanced Ubuntu LiveUSB customization and remastering tool"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "GPL-2.0-or-later" }
@@ -28,3 +28,6 @@ live-usb-gui = "liveusb.gui.app:main"
 
 [tool.setuptools.packages.find]
 include = ["liveusb", "liveusb.*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "liveusb.__version__" }

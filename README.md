@@ -1,4 +1,4 @@
-# LiveUSB Creator 3
+# LiveUSB Creator
 # Copyright (C) 2012-2014  Kevin Atwood
 # Copyright (C) 2026  Kevin Thomas
 # 
@@ -27,15 +27,18 @@ current project name or support destination. The current project home is
 An advanced LiveUSB customization and remastering tool. With it, you can build your own Ubuntu based remix using Ubuntu Mini Remix, Ubuntu or its derivatives from an ISO image.
 
 This is the Python implementation of LiveUSB Creator (GTK3/PyGObject GUI +
-Python backend), for Ubuntu 14.04 and its derivatives.
+Python backend). The current version is `0.1.0.dev0`, a pre-alpha recovery
+baseline rather than a product release.
 
 The project originally shipped as LiveCD Creator: a Gambas3 GUI backed by
 Bash scripts. That implementation was retired from this repository on
 2026-07-25 and archived, verified byte-identical, to
 `/media/nos4r2/hard_vol2/LiveCD-Original-2015-Archive/`; it remains visible
-in git history before the rename. See `HANDOFF.md` for the architecture map,
-risk register, and what has and has not been verified in this
-implementation.
+in git history before the rename. See [STATUS.md](STATUS.md) for the current
+truth, [ROADMAP.md](ROADMAP.md) for the active recovery and modernization
+route, and the
+[dated Python-port handoff](docs/history/python-port-handoff-20260725.md)
+for the original translation map and risk register.
 
 ## Layout
 
@@ -99,12 +102,14 @@ used. The top-level config directory itself is a deliberate divergence,
 not a fidelity claim: it is now `/etc/live-usb` (was `/etc/live-cd`), and
 the default work directory is now `/home/live-usb` (was `/home/live-cd`).
 An old `/etc/live-cd` installation from the original LiveCD Creator is
-**not** picked up automatically — see `HANDOFF.md` §7.
+**not** picked up automatically — see the
+[historical handoff](docs/history/python-port-handoff-20260725.md).
 
 This GUI could not be visually tested in the environment it was written in
 (no working GTK/X11 display) — sanity-check window layouts on a real desktop
-before relying on it. See `HANDOFF.md` for the full list of what has and has
-not been verified.
+before relying on it. See [STATUS.md](STATUS.md) for current acceptance state
+and the [historical handoff](docs/history/python-port-handoff-20260725.md)
+for the original verification record.
 
 ## Credits
 

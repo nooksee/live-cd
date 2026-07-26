@@ -33,7 +33,7 @@ request. There is no longer a second implementation to keep in sync
 against; this repository is the sole reference.
 
 Read `STATUS.md`, `ROADMAP.md`, and `CONTRIBUTORS.md` before material work.
-The dated `docs/history/python-port-handoff-20260725.md` preserves the
+The dated `docs/history/python-port.md` preserves the
 architecture map, including the mapping from the retired original's
 scripts/forms to their Python counterparts, and the original risk register.
 **The port has never been run against a real ISO** — treat the first real
@@ -49,7 +49,7 @@ remastering run as the actual acceptance test.
    convention, not this project's own naming, and must stay byte-compatible.
    The tool's *own* config directory, by contrast, is deliberately
    `/etc/live-usb` now (was `/etc/live-cd` before the 2026-07-25 rename) —
-   see `docs/history/python-port-handoff-20260725.md` §7 item 5. An existing
+   see `docs/history/python-port.md` §7 item 5. An existing
    `/etc/live-cd` installation from the original LiveCD Creator is **not**
    picked up automatically; there is no migration path by design, since the
    port has never shipped and there is no real install in the field to

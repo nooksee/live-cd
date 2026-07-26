@@ -37,7 +37,7 @@ Bash scripts. That implementation was retired from this repository on
 in git history before the rename. See [STATUS.md](STATUS.md) for the current
 truth, [ROADMAP.md](ROADMAP.md) for the active recovery and modernization
 route, and the
-[dated Python-port handoff](docs/history/python-port-handoff-20260725.md)
+[dated Python-port handoff](docs/history/python-port.md)
 for the original translation map and risk register.
 
 ## Layout
@@ -103,12 +103,12 @@ not a fidelity claim: it is now `/etc/live-usb` (was `/etc/live-cd`), and
 the default work directory is now `/home/live-usb` (was `/home/live-cd`).
 An old `/etc/live-cd` installation from the original LiveCD Creator is
 **not** picked up automatically — see the
-[historical handoff](docs/history/python-port-handoff-20260725.md).
+[historical handoff](docs/history/python-port.md).
 
 This GUI could not be visually tested in the environment it was written in
 (no working GTK/X11 display) — sanity-check window layouts on a real desktop
 before relying on it. See [STATUS.md](STATUS.md) for current acceptance state
-and the [historical handoff](docs/history/python-port-handoff-20260725.md)
+and the [historical handoff](docs/history/python-port.md)
 for the original verification record.
 
 ## Credits

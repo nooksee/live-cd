@@ -53,7 +53,7 @@ Claude Devens completed a read-only fidelity comparison over original scripts
 `11/11` and Python backend modules `13/13`. The review confirmed five defects,
 four other behavioral divergences, and four untested risk classes. The
 accepted findings and legacy acceptance caveat are recorded in
-`docs/reviews/phase1a-fidelity-review-20260726.md`.
+`docs/reviews/phase1a-fidelity-review.md`.
 
 ## Media evidence
 
@@ -97,7 +97,7 @@ Phase 1 is the only active product gate:
 > QEMU while leaving residual mounts, locks, and blocked files at `0`.
 
 See `ROADMAP.md` for scope, team lanes, exclusions, and later phases. See
-`docs/history/python-port-handoff-20260725.md` only for historical
+`docs/history/python-port.md` only for historical
 translation mapping, prior verification evidence, and the inherited risk
-register. See `docs/reviews/phase1a-fidelity-review-20260726.md` for the
+register. See `docs/reviews/phase1a-fidelity-review.md` for the
 accepted behavioral comparison and checksum-comparison caveat.

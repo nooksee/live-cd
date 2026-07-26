@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,613 +12,708 @@ from liveusb.backend import mount_session
 from liveusb.backend import mounts
 from liveusb.backend.mount_session import (
     MountAcquisitionError,
+    MountRecoveryError,
     MountSession,
     MountSessionCleanupError,
 )
 
 
+def mount_identity(
+    mount_id,
+    path,
+    parent_id=1,
+    source="/synthetic",
+):
+    return mounts.MountIdentity(
+        mount_id=mount_id,
+        parent_id=parent_id,
+        major_minor="0:1",
+        root="/",
+        mount_point=os.path.abspath(path),
+        mount_options=("rw",),
+        optional_fields=(),
+        fs_type="none",
+        source=source,
+        super_options=("rw",),
+    )
+
+
+class FakeMountTable:
+    def __init__(self):
+        self.identities = []
+        self.next_id = 100
+        self.mount_commands = []
+        self.unmount_commands = []
+        self.fail_next_mount = False
+        self.ambiguous_next_mount = False
+        self.nested_on_rbind = False
+        self.fail_unmount_paths = set()
+
+    def reader(self):
+        return tuple(self.identities)
+
+    def add(self, path, parent_id=1, source="/synthetic"):
+        identity = mount_identity(
+            self.next_id,
+            path,
+            parent_id=parent_id,
+            source=source,
+        )
+        self.next_id += 1
+        self.identities.append(identity)
+        return identity
+
+    def remove_path(self, path):
+        absolute = os.path.abspath(path)
+        self.identities = [
+            identity
+            for identity in self.identities
+            if identity.mount_point != absolute
+        ]
+
+    def replace_path(self, path):
+        self.remove_path(path)
+        return self.add(path, source="/replacement")
+
+    def mount(self, command):
+        command = list(command)
+        self.mount_commands.append(command)
+        destination = os.path.abspath(command[-1])
+        source = command[-2]
+        if self.fail_next_mount:
+            self.fail_next_mount = False
+            self.add(destination, source="/external")
+            return False
+        if self.ambiguous_next_mount:
+            self.ambiguous_next_mount = False
+            self.add(destination, source=source)
+            self.add(destination, source="/concurrent")
+            return True
+        root = self.add(destination, source=source)
+        if "--rbind" in command and self.nested_on_rbind:
+            self.add(
+                os.path.join(destination, "pts"),
+                parent_id=root.mount_id,
+                source="/dev/pts",
+            )
+        return True
+
+    def unmount(self, command):
+        command = list(command)
+        self.unmount_commands.append(command)
+        destination = os.path.abspath(command[-1])
+        if destination in self.fail_unmount_paths:
+            return False
+        candidates = [
+            identity
+            for identity in self.identities
+            if identity.mount_point == destination
+        ]
+        if len(candidates) != 1:
+            return False
+        self.identities.remove(candidates[0])
+        return True
+
+
+class FakeXAccess:
+    def __init__(self, enabled=True, local_present=False):
+        self.state = mounts.XAccessState(
+            enabled=enabled,
+            local_present=local_present,
+        )
+        self.mutations = []
+        self.fail_grant = False
+        self.fail_restore = False
+        self.query_error = None
+
+    def query(self):
+        if self.query_error is not None:
+            raise self.query_error
+        return self.state
+
+    def mutate(self, add):
+        self.mutations.append(add)
+        if add and self.fail_grant:
+            return False
+        if not add and self.fail_restore:
+            return False
+        self.state = mounts.XAccessState(
+            enabled=self.state.enabled,
+            local_present=add,
+        )
+        return True
+
+
+class MountEvidenceTests(unittest.TestCase):
+    def test_exact_mountpoint_does_not_match_prefix_collision(self):
+        text = (
+            "10 1 0:1 / /work/FileSystem/dev rw - none /dev rw\n"
+            "11 1 0:2 / /work/FileSystem/device rw - none /device rw\n"
+        )
+
+        identities = mounts.parse_mountinfo(text)
+
+        self.assertEqual(
+            tuple(
+                identity.mount_id
+                for identity in mounts.mounts_at(
+                    identities,
+                    "/work/FileSystem/dev",
+                )
+            ),
+            (10,),
+        )
+
+    def test_mountinfo_decodes_escaped_space_exactly(self):
+        identities = mounts.parse_mountinfo(
+            "20 1 0:3 / /work/FileSystem/name\\040with\\040space "
+            "rw - none /source\\040name rw\n"
+        )
+
+        self.assertEqual(
+            identities[0].mount_point,
+            "/work/FileSystem/name with space",
+        )
+        self.assertEqual(identities[0].source, "/source name")
+
+    def test_stacked_mounts_remain_distinct_identities(self):
+        identities = mounts.parse_mountinfo(
+            "30 1 0:4 / /work/FileSystem/dev rw - none /one rw\n"
+            "31 1 0:5 / /work/FileSystem/dev rw - none /two rw\n"
+        )
+
+        self.assertEqual(
+            tuple(
+                identity.mount_id
+                for identity in mounts.mounts_at(
+                    identities,
+                    "/work/FileSystem/dev",
+                )
+            ),
+            (30, 31),
+        )
+
+    def test_xhost_parser_rejects_unknown_output(self):
+        with self.assertRaises(mounts.XAccessEvidenceError):
+            mounts.parse_xhost_output("some unknown response\n")
+
+    def test_xhost_parser_preserves_enabled_local_and_other_entries(self):
+        state = mounts.parse_xhost_output(
+            "access control enabled, only authorized clients can connect\n"
+            "SI:localuser:operator\n"
+            "LOCAL:\n"
+        )
+
+        self.assertEqual(
+            state,
+            mounts.XAccessState(
+                enabled=True,
+                local_present=True,
+            ),
+        )
+
+    def test_xhost_parser_recognizes_disabled_access_control(self):
+        state = mounts.parse_xhost_output(
+            "access control disabled, clients can connect from any host\n"
+        )
+
+        self.assertEqual(
+            state,
+            mounts.XAccessState(
+                enabled=False,
+                local_present=False,
+            ),
+        )
+
+
 class MountSessionTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
         self.root = Path(self.temporary_directory.name)
         self.work_dir = self.root / "work"
         self.fs_dir = self.work_dir / "FileSystem"
-        self.mount_dir = self.root / "mount"
-        for directory in (
-            self.fs_dir / "etc",
-            self.fs_dir / "usr",
-            self.fs_dir / "root",
-            self.mount_dir,
-        ):
-            directory.mkdir(parents=True, exist_ok=True)
+        self.runtime_dir = self.root / "runtime"
+        for relative in ("etc", "usr", "root", "tmp"):
+            (self.fs_dir / relative).mkdir(
+                parents=True,
+                exist_ok=True,
+            )
         self.ctx = Context(
             work_dir=str(self.work_dir),
-            mount_dir=str(self.mount_dir),
+            mount_dir=str(self.root / "mount"),
+            runtime_dir=str(self.runtime_dir),
+        )
+        self.table = FakeMountTable()
+        self.x_access = FakeXAccess(
+            enabled=False,
+            local_present=False,
         )
 
-    def tearDown(self):
-        self.temporary_directory.cleanup()
-
-    @staticmethod
-    def _acquisition(
-        source,
-        destination,
-        label,
-        outcome,
-        owned=False,
-        created_directory=False,
-        error=None,
-    ):
-        return mounts.MountAcquisition(
-            source=source,
-            destination=str(destination),
-            label=label,
-            outcome=outcome,
-            owned=owned,
-            created_directory=created_directory,
-            error=error,
+    def session(self):
+        return MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=self.table.mount,
+            unmount_runner=self.table.unmount,
+            x_query=self.x_access.query,
+            x_mutator=self.x_access.mutate,
         )
 
-    def test_mount_helpers_report_created_present_and_failed(self):
-        dev = self.fs_dir / "dev"
-        proc = self.fs_dir / "proc"
-        sys = self.fs_dir / "sys"
-        dev.mkdir()
-        mounted = {str(dev)}
-        commands = []
+    def assert_runtime_clean(self):
+        self.assertFalse(
+            os.path.lexists(
+                self.runtime_dir / "mount-session.json"
+            )
+        )
+        pending = tuple(
+            self.runtime_dir.glob("mount-session.json.pending-*")
+        )
+        self.assertEqual(pending, ())
 
-        def fake_run_ok(command):
-            command = list(command)
-            commands.append(command)
-            destination = command[-1]
-            if destination == str(proc):
-                mounted.add(destination)
-                return True
-            return False
+    def test_preexisting_mount_is_not_owned_or_unmounted(self):
+        existing = self.table.add(self.fs_dir / "dev", source="/dev")
 
-        with mock.patch.object(
-            mounts,
-            "is_mounted",
-            side_effect=lambda path: str(path) in mounted,
-        ), mock.patch.object(
-            mounts,
-            "run_ok",
-            side_effect=fake_run_ok,
-        ), mock.patch.object(
-            mounts.messages,
-            "extra_error_no_exit",
-        ):
-            results = mounts.mount_sys(self.ctx)
+        with self.session() as session:
+            acquisitions = session.mount_sys()
 
         self.assertEqual(
-            tuple(result.outcome for result in results),
-            (
-                mounts.MOUNT_ALREADY_PRESENT,
-                mounts.MOUNT_CREATED,
-                mounts.MOUNT_FAILED,
-            ),
+            acquisitions[0].outcome,
+            mounts.MOUNT_ALREADY_PRESENT,
         )
-        self.assertEqual(
-            tuple(result.owned for result in results),
-            (False, True, False),
+        self.assertEqual(acquisitions[0].owned, ())
+        self.assertIn(existing, self.table.identities)
+        self.assertNotIn(
+            str(self.fs_dir / "dev"),
+            tuple(command[-1] for command in self.table.unmount_commands),
         )
-        self.assertEqual(
-            tuple(result.created_directory for result in results),
-            (False, True, True),
-        )
-        self.assertIsInstance(
-            results[2].error,
-            Exception,
-        )
-        self.assertEqual(len(commands), 2)
-        self.assertTrue(proc.is_dir())
-        self.assertTrue(sys.is_dir())
+        self.assert_runtime_clean()
 
-    def test_mount_dbus_reports_the_symlinked_run_layout(self):
-        (self.fs_dir / "var").mkdir()
-        (self.fs_dir / "run").mkdir()
-        os.symlink("../run", str(self.fs_dir / "var/run"))
-        mounted = set()
+    def test_owned_mounts_and_nested_rbind_cleanup_in_reverse_order(self):
+        self.table.nested_on_rbind = True
 
-        def fake_run_ok(command):
-            mounted.add(command[-1])
-            return True
-
-        with mock.patch.object(
-            mounts,
-            "is_mounted",
-            side_effect=lambda path: str(path) in mounted,
-        ), mock.patch.object(
-            mounts,
-            "run_ok",
-            side_effect=fake_run_ok,
-        ):
-            results = mounts.mount_dbus(self.ctx)
-
-        self.assertEqual(
-            tuple(result.source for result in results),
-            ("/var/lib/dbus", "/run/dbus"),
-        )
-        self.assertEqual(
-            tuple(result.destination for result in results),
-            (
-                str(self.fs_dir / "var/lib/dbus"),
-                str(self.fs_dir / "run/dbus"),
-            ),
-        )
-        self.assertTrue(all(result.owned for result in results))
-
-    def test_recursive_backstop_is_deepest_first_and_preserves_trees(
-        self,
-    ):
-        dev = str(self.fs_dir / "dev")
-        candidates = (
-            dev,
-            dev + "/pts",
-            str(self.fs_dir / "proc"),
-            str(self.fs_dir / "proc/deeper"),
-        )
-        unmounted = []
-
-        def fake_unmount(destination, label, extra_error=False):
-            unmounted.append((destination, label, extra_error))
-            return mounts.UnmountResult(
-                destination=destination,
-                label=label,
-                outcome=mounts.UNMOUNTED,
+        with self.session() as session:
+            acquisitions = session.mount_sys()
+            unrelated = self.table.add(
+                self.fs_dir / "unrelated",
+                source="/unrelated",
             )
 
-        with mock.patch.object(
-            mounts,
-            "mounted_paths",
-            return_value=candidates,
-        ), mock.patch.object(
-            mounts,
-            "_umount_one",
-            side_effect=fake_unmount,
-        ):
-            results = mounts.recursive_umount(
-                self.ctx,
-                preserve=(dev,),
+        self.assertTrue(
+            all(
+                acquisition.outcome == mounts.MOUNT_CREATED
+                for acquisition in acquisitions
             )
-
-        self.assertEqual(
-            tuple(result.destination for result in results),
-            (
-                str(self.fs_dir / "proc/deeper"),
-                str(self.fs_dir / "proc"),
-            ),
         )
-        self.assertEqual(
-            tuple(item[0] for item in unmounted),
-            (
-                str(self.fs_dir / "proc/deeper"),
-                str(self.fs_dir / "proc"),
-            ),
-        )
-
-    def test_session_releases_only_owned_mounts_in_reverse_order(self):
-        dev = str(self.fs_dir / "dev")
-        proc = str(self.fs_dir / "proc")
-        sys = str(self.fs_dir / "sys")
-        mounted = {dev, proc, sys}
-        acquisitions = (
-            self._acquisition(
-                "/dev",
-                dev,
-                "/dev",
-                mounts.MOUNT_CREATED,
-                owned=True,
-            ),
-            self._acquisition(
-                "/proc",
-                proc,
-                "/proc",
-                mounts.MOUNT_ALREADY_PRESENT,
-            ),
-            self._acquisition(
-                "/sys",
-                sys,
-                "/sys",
-                mounts.MOUNT_CREATED,
-                owned=True,
-            ),
-        )
-        direct_order = []
-
-        def fake_unmount(destination, label, extra_error=False):
-            direct_order.append(destination)
-            mounted.discard(destination)
-            return mounts.UnmountResult(
-                destination=destination,
-                label=label,
-                outcome=mounts.UNMOUNTED,
-            )
-
-        with mock.patch.object(
-            mounts,
-            "mounted_paths",
-            return_value=(proc,),
-        ), mock.patch.object(
-            mounts,
-            "mount_sys",
-            return_value=acquisitions,
-        ), mock.patch.object(
-            mounts,
-            "_umount_one",
-            side_effect=fake_unmount,
-        ), mock.patch.object(
-            mounts,
-            "recursive_umount",
-            return_value=tuple(),
-        ) as backstop, mock.patch.object(
-            mounts,
-            "is_mounted",
-            side_effect=lambda path: str(path) in mounted,
-        ):
-            with MountSession(self.ctx) as session:
-                session.mount_sys()
-
-        self.assertEqual(direct_order, [sys, dev])
-        self.assertNotIn(proc, direct_order)
-        self.assertEqual(
-            set(backstop.call_args.kwargs["preserve"]),
-            {proc},
-        )
-
-    def test_partial_mount_failure_cleans_owned_mounts_and_roots(self):
-        dev = self.fs_dir / "dev"
-        proc = self.fs_dir / "proc"
-        dev.mkdir()
-        proc.mkdir()
-        mounted = {str(dev)}
-        acquisitions = (
-            self._acquisition(
-                "/dev",
-                dev,
-                "/dev",
-                mounts.MOUNT_CREATED,
-                owned=True,
-                created_directory=True,
-            ),
-            self._acquisition(
-                "/proc",
-                proc,
-                "/proc",
-                mounts.MOUNT_FAILED,
-                created_directory=True,
-                error=RuntimeError("simulated mount failure"),
-            ),
-        )
-        unmounted = []
-
-        def fake_unmount(destination, label, extra_error=False):
-            unmounted.append(destination)
-            mounted.discard(destination)
-            return mounts.UnmountResult(
-                destination=destination,
-                label=label,
-                outcome=mounts.UNMOUNTED,
-            )
-
-        with mock.patch.object(
-            mounts,
-            "mounted_paths",
-            return_value=tuple(),
-        ), mock.patch.object(
-            mounts,
-            "mount_sys",
-            return_value=acquisitions,
-        ), mock.patch.object(
-            mounts,
-            "_umount_one",
-            side_effect=fake_unmount,
-        ), mock.patch.object(
-            mounts,
-            "recursive_umount",
-            return_value=tuple(),
-        ), mock.patch.object(
-            mounts,
-            "is_mounted",
-            side_effect=lambda path: str(path) in mounted,
-        ):
-            with self.assertRaises(MountAcquisitionError) as captured:
-                with MountSession(self.ctx) as session:
-                    session.mount_sys()
-
-        self.assertEqual(len(captured.exception.results), 1)
-        self.assertEqual(unmounted, [str(dev)])
-        self.assertFalse(os.path.lexists(str(dev)))
-        self.assertFalse(os.path.lexists(str(proc)))
-        self.assertEqual(mounted, set())
-
-    def test_x_grant_exception_still_invokes_revocation(self):
-        with mock.patch.object(
-            mounts,
-            "mounted_paths",
-            return_value=tuple(),
-        ), mock.patch.object(
-            mounts,
-            "allow_local_x_access",
-            side_effect=RuntimeError("simulated xhost failure"),
-        ), mock.patch.object(
-            mounts,
-            "block_local_x_access",
-            return_value=True,
-        ) as revoke, mock.patch.object(
-            mounts,
-            "recursive_umount",
-            return_value=tuple(),
-        ):
-            with self.assertRaises(MountAcquisitionError):
-                with MountSession(self.ctx) as session:
-                    session.allow_local_x_access()
-
-        revoke.assert_called_once_with()
-
-    def test_cleanup_attempts_every_step_and_chains_primary(self):
-        dev = str(self.fs_dir / "dev")
-        sys = str(self.fs_dir / "sys")
-        mounted = {dev, sys}
-        acquisitions = (
-            self._acquisition(
-                "/dev",
-                dev,
-                "/dev",
-                mounts.MOUNT_CREATED,
-                owned=True,
-            ),
-            self._acquisition(
-                "/sys",
-                sys,
-                "/sys",
-                mounts.MOUNT_CREATED,
-                owned=True,
-            ),
-        )
-        direct_order = []
-
-        def fail_unmount(destination, label, extra_error=False):
-            direct_order.append(destination)
-            return mounts.UnmountResult(
-                destination=destination,
-                label=label,
-                outcome=mounts.UNMOUNT_FAILED,
-                error=RuntimeError(
-                    f"simulated direct failure: {destination}"
-                ),
-            )
-
-        primary_error = RuntimeError("simulated caller failure")
-        backstop_failure = mounts.UnmountResult(
-            destination=str(self.fs_dir / "nested"),
-            label="/nested",
-            outcome=mounts.UNMOUNT_FAILED,
-            error=RuntimeError("simulated backstop failure"),
-        )
-
-        with mock.patch.object(
-            mounts,
-            "mounted_paths",
-            return_value=tuple(),
-        ), mock.patch.object(
-            mounts,
-            "mount_sys",
-            return_value=acquisitions,
-        ), mock.patch.object(
-            mounts,
-            "_umount_one",
-            side_effect=fail_unmount,
-        ), mock.patch.object(
-            mounts,
-            "recursive_umount",
-            return_value=(backstop_failure,),
-        ), mock.patch.object(
-            mounts,
-            "is_mounted",
-            side_effect=lambda path: str(path) in mounted,
-        ), mock.patch.object(
-            mounts,
-            "allow_local_x_access",
-            return_value=True,
-        ), mock.patch.object(
-            mounts,
-            "block_local_x_access",
-            return_value=False,
-        ) as revoke:
-            with self.assertRaises(
-                MountSessionCleanupError
-            ) as captured:
-                with MountSession(self.ctx) as session:
-                    session.mount_sys()
-                    session.allow_local_x_access()
-                    raise primary_error
-
-        self.assertIs(captured.exception.__cause__, primary_error)
-        self.assertEqual(direct_order, [sys, dev])
         self.assertEqual(
             tuple(
-                failure.operation
-                for failure in captured.exception.failures
+                command[-1]
+                for command in self.table.unmount_commands
             ),
             (
-                "unmount_owned",
-                "unmount_owned",
-                "recursive_unmount_backstop",
-                "revoke_local_x_access",
+                str(self.fs_dir / "sys"),
+                str(self.fs_dir / "proc"),
+                str(self.fs_dir / "dev/pts"),
+                str(self.fs_dir / "dev"),
             ),
         )
-        revoke.assert_called_once_with()
+        self.assertEqual(self.table.identities, [unrelated])
+        self.assert_runtime_clean()
 
-    def test_cleanup_failures_remain_retryable_and_idempotent(self):
-        dev = self.fs_dir / "dev"
-        dev.mkdir()
-        mounted = {str(dev)}
-        acquisition = self._acquisition(
-            "/dev",
-            dev,
-            "/dev",
-            mounts.MOUNT_CREATED,
-            owned=True,
-            created_directory=True,
-        )
-        attempt = {"number": 1}
-
-        def retrying_unmount(destination, label, extra_error=False):
-            if attempt["number"] == 1:
-                return mounts.UnmountResult(
-                    destination=destination,
-                    label=label,
-                    outcome=mounts.UNMOUNT_FAILED,
-                    error=RuntimeError("first unmount failed"),
-                )
-            mounted.discard(destination)
-            return mounts.UnmountResult(
-                destination=destination,
-                label=label,
-                outcome=mounts.UNMOUNTED,
+    def test_later_nested_mount_with_owned_ancestry_is_cleaned(self):
+        with self.session() as session:
+            acquisitions = session.mount_sys()
+            owned_dev = acquisitions[0].owned[0]
+            self.table.add(
+                self.fs_dir / "dev/shm",
+                parent_id=owned_dev.mount_id,
+                source="/dev/shm",
             )
 
-        def retrying_backstop(ctx, preserve=()):
-            if attempt["number"] == 1:
-                return (
-                    mounts.UnmountResult(
-                        destination=str(dev),
-                        label="/dev",
-                        outcome=mounts.UNMOUNT_FAILED,
-                        error=RuntimeError("first backstop failed"),
-                    ),
-                )
-            return tuple()
-
-        def retrying_revoke():
-            return attempt["number"] != 1
-
-        session = MountSession(self.ctx)
-        with mock.patch.object(
-            mounts,
-            "mounted_paths",
-            return_value=tuple(),
-        ), mock.patch.object(
-            mounts,
-            "mount_sys",
-            return_value=(acquisition,),
-        ), mock.patch.object(
-            mounts,
-            "_umount_one",
-            side_effect=retrying_unmount,
-        ), mock.patch.object(
-            mounts,
-            "recursive_umount",
-            side_effect=retrying_backstop,
-        ), mock.patch.object(
-            mounts,
-            "is_mounted",
-            side_effect=lambda path: str(path) in mounted,
-        ), mock.patch.object(
-            mounts,
-            "allow_local_x_access",
-            return_value=True,
-        ), mock.patch.object(
-            mounts,
-            "block_local_x_access",
-            side_effect=retrying_revoke,
-        ):
-            session.__enter__()
-            session.mount_sys()
-            session.allow_local_x_access()
-            with self.assertRaises(MountSessionCleanupError):
-                session.cleanup()
-
-            self.assertTrue(dev.is_dir())
-            attempt["number"] = 2
-            session.cleanup()
-            session.cleanup()
-
-        self.assertFalse(os.path.lexists(str(dev)))
-        self.assertEqual(mounted, set())
-
-    def test_created_directory_cleanup_failure_chains_and_retries(self):
-        failed_root = self.fs_dir / "proc"
-        failed_root.mkdir()
-        acquisition = self._acquisition(
-            "/proc",
-            failed_root,
-            "/proc",
-            mounts.MOUNT_FAILED,
-            created_directory=True,
-            error=RuntimeError("simulated acquisition failure"),
+        self.assertEqual(
+            tuple(
+                command[-1]
+                for command in self.table.unmount_commands
+            ),
+            (
+                str(self.fs_dir / "sys"),
+                str(self.fs_dir / "proc"),
+                str(self.fs_dir / "dev/shm"),
+                str(self.fs_dir / "dev"),
+            ),
         )
-        real_rmdir = mount_session.os.rmdir
-        failed_once = False
+        self.assertEqual(self.table.identities, [])
+        self.assert_runtime_clean()
 
-        def fail_rmdir_once(path):
-            nonlocal failed_once
-            if not failed_once and str(path) == str(failed_root):
-                failed_once = True
-                raise OSError("simulated root removal failure")
-            return real_rmdir(path)
+    def test_later_nested_mount_without_owned_ancestry_is_preserved(self):
+        session = self.session()
+        session.__enter__()
+        session.mount_sys()
+        ambiguous = self.table.add(
+            self.fs_dir / "dev/unrelated",
+            parent_id=1,
+            source="/unrelated",
+        )
 
-        session = MountSession(self.ctx)
-        with mock.patch.object(
-            mounts,
-            "mounted_paths",
-            return_value=tuple(),
-        ), mock.patch.object(
-            mounts,
-            "mount_sys",
-            return_value=(acquisition,),
-        ), mock.patch.object(
-            mounts,
-            "recursive_umount",
-            return_value=tuple(),
-        ), mock.patch.object(
-            mount_session.os,
-            "rmdir",
-            side_effect=fail_rmdir_once,
-        ):
-            with self.assertRaises(
-                MountSessionCleanupError
-            ) as captured:
-                with session:
-                    session.mount_sys()
+        with self.assertRaises(MountSessionCleanupError):
+            session.__exit__(None, None, None)
+
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assertIn(ambiguous, self.table.identities)
+        self.assertTrue(os.path.lexists(session.journal_path))
+
+    def test_failed_mount_owns_zero_even_if_another_mount_appears(self):
+        self.table.fail_next_mount = True
+        session = self.session()
+
+        with self.assertRaises(MountSessionCleanupError) as captured:
+            with session:
+                session.mount_sys()
 
         self.assertIsInstance(
             captured.exception.__cause__,
             MountAcquisitionError,
         )
-        self.assertEqual(len(captured.exception.failures), 1)
+        self.assertEqual(self.table.unmount_commands, [])
+        external_path = self.fs_dir / "dev"
         self.assertEqual(
-            captured.exception.failures[0].operation,
-            "remove_mount_directory",
+            len(mounts.mounts_at(self.table.reader(), external_path)),
+            1,
         )
-        self.assertTrue(failed_root.is_dir())
+        self.assertTrue(os.path.lexists(session.journal_path))
 
-        with mock.patch.object(
-            mounts,
-            "recursive_umount",
-            return_value=tuple(),
-        ):
-            session.cleanup()
-        self.assertFalse(os.path.lexists(str(failed_root)))
+        self.table.remove_path(external_path)
+        session.cleanup()
 
-    def test_entry_fails_closed_when_mount_inventory_is_unavailable(self):
-        with mock.patch.object(
-            mounts,
-            "mounted_paths",
-            side_effect=OSError("simulated mount-table read failure"),
-        ), mock.patch.object(
-            mounts,
-            "recursive_umount",
-        ) as backstop:
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assertFalse(external_path.exists())
+        self.assert_runtime_clean()
+
+    def test_ambiguous_concurrent_acquisition_is_preserved(self):
+        self.table.ambiguous_next_mount = True
+        session = self.session()
+
+        with self.assertRaises(MountSessionCleanupError) as captured:
+            with session:
+                session.mount_sys()
+
+        self.assertIsInstance(
+            captured.exception.__cause__,
+            MountAcquisitionError,
+        )
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assertEqual(
+            len(
+                mounts.mounts_at(
+                    self.table.reader(),
+                    self.fs_dir / "dev",
+                )
+            ),
+            2,
+        )
+        self.assertTrue(os.path.lexists(session.journal_path))
+
+    def test_replacement_mount_fails_before_any_cleanup_mutation(self):
+        session = self.session()
+        session.__enter__()
+        session.mount_sys()
+        self.table.replace_path(self.fs_dir / "sys")
+
+        with self.assertRaises(MountSessionCleanupError):
+            session.__exit__(None, None, None)
+
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assertTrue(os.path.lexists(session.journal_path))
+
+    def test_symlinked_final_target_executes_mount_zero_times(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        os.symlink(str(outside), str(self.fs_dir / "dev"))
+
+        with self.assertRaises(MountAcquisitionError):
+            with self.session() as session:
+                session.mount_sys()
+
+        self.assertEqual(self.table.mount_commands, [])
+        self.assert_runtime_clean()
+
+    def test_symlinked_parent_escape_executes_mount_zero_times(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        os.symlink(str(outside), str(self.fs_dir / "var"))
+
+        with self.assertRaises(MountAcquisitionError):
+            with self.session() as session:
+                session.mount_dbus()
+
+        self.assertEqual(self.table.mount_commands, [])
+        self.assert_runtime_clean()
+
+    def test_legitimate_var_run_link_stays_inside_filesystem(self):
+        (self.fs_dir / "var").mkdir()
+        (self.fs_dir / "run").mkdir()
+        os.symlink("../run", str(self.fs_dir / "var/run"))
+
+        with self.session() as session:
+            acquisitions = session.mount_dbus()
+
+        self.assertEqual(acquisitions[1].source, "/run/dbus")
+        self.assertEqual(
+            acquisitions[1].destination,
+            str(self.fs_dir / "run/dbus"),
+        )
+        self.assertTrue(os.path.islink(self.fs_dir / "var/run"))
+        self.assert_runtime_clean()
+
+    def test_competing_live_operation_lock_is_rejected_by_flock(self):
+        first = self.session()
+        second = self.session()
+        first.__enter__()
+        try:
             with self.assertRaisesRegex(
-                MountAcquisitionError,
-                "pre-existing",
+                MountRecoveryError,
+                "holds the runtime lock",
             ):
-                with MountSession(self.ctx):
-                    self.fail("Unavailable mount evidence must reject entry")
+                second.__enter__()
+        finally:
+            first.__exit__(None, None, None)
 
-        backstop.assert_not_called()
+        self.assertTrue(
+            os.path.lexists(self.runtime_dir / "operation.lock")
+        )
+        with second:
+            pass
+        self.assert_runtime_clean()
+
+    def test_x_disabled_performs_no_acl_mutation(self):
+        self.x_access = FakeXAccess(
+            enabled=False,
+            local_present=False,
+        )
+
+        with self.session() as session:
+            session.allow_local_x_access()
+
+        self.assertEqual(self.x_access.mutations, [])
+        self.assert_runtime_clean()
+
+    def test_preexisting_local_acl_is_not_revoked(self):
+        self.x_access = FakeXAccess(
+            enabled=True,
+            local_present=True,
+        )
+
+        with self.session() as session:
+            session.allow_local_x_access()
+
+        self.assertEqual(self.x_access.mutations, [])
+        self.assertTrue(self.x_access.state.local_present)
+        self.assert_runtime_clean()
+
+    def test_session_owned_local_acl_is_granted_and_revoked(self):
+        self.x_access = FakeXAccess(
+            enabled=True,
+            local_present=False,
+        )
+
+        with self.session() as session:
+            session.allow_local_x_access()
+            self.assertTrue(self.x_access.state.local_present)
+
+        self.assertEqual(self.x_access.mutations, [True, False])
+        self.assertEqual(
+            self.x_access.state,
+            mounts.XAccessState(
+                enabled=True,
+                local_present=False,
+            ),
+        )
+        self.assert_runtime_clean()
+
+    def test_x_grant_failure_is_nonblocking_and_leaves_no_mutation(self):
+        self.x_access = FakeXAccess(
+            enabled=True,
+            local_present=False,
+        )
+        self.x_access.fail_grant = True
+
+        with self.assertRaises(MountAcquisitionError):
+            with self.session() as session:
+                session.allow_local_x_access()
+
+        self.assertEqual(self.x_access.mutations, [True])
+        self.assertFalse(self.x_access.state.local_present)
+        self.assert_runtime_clean()
+
+    def test_x_restore_failure_preserves_journal_for_retry(self):
+        self.x_access = FakeXAccess(
+            enabled=True,
+            local_present=False,
+        )
+        self.x_access.fail_restore = True
+        session = self.session()
+
+        with self.assertRaises(MountSessionCleanupError):
+            with session:
+                session.allow_local_x_access()
+
+        self.assertTrue(self.x_access.state.local_present)
+        self.assertTrue(os.path.lexists(session.journal_path))
+
+        self.x_access.fail_restore = False
+        session.cleanup()
+
+        self.assertFalse(self.x_access.state.local_present)
+        self.assert_runtime_clean()
+
+    def test_unparsable_x_state_fails_before_mutation(self):
+        self.x_access.query_error = mounts.XAccessEvidenceError(
+            "synthetic unparsable output"
+        )
+
+        with self.assertRaises(MountAcquisitionError):
+            with self.session() as session:
+                session.allow_local_x_access()
+
+        self.assertEqual(self.x_access.mutations, [])
+        self.assert_runtime_clean()
+
+    def test_every_created_directory_is_removed_in_reverse_order(self):
+        shutil.rmtree(self.fs_dir / "tmp")
+        removed = []
+        real_rmdir = os.rmdir
+
+        def recording_rmdir(path):
+            removed.append(os.path.abspath(path))
+            return real_rmdir(path)
+
+        with mock.patch.object(
+            mount_session.os,
+            "rmdir",
+            side_effect=recording_rmdir,
+        ):
+            with self.session() as session:
+                session.mount_dbus()
+
+        expected = (
+            str(self.fs_dir / "var/run/dbus"),
+            str(self.fs_dir / "var/run"),
+            str(self.fs_dir / "var/lib/dbus"),
+            str(self.fs_dir / "var/lib"),
+            str(self.fs_dir / "var"),
+        )
+        self.assertEqual(tuple(removed), expected)
+        self.assert_runtime_clean()
+
+    def test_staging_uses_unique_paths_and_preserves_legacy_names(self):
+        legacy_deb = self.fs_dir / "tmp/temp.deb"
+        legacy_hook = self.fs_dir / "tmp/HOOK"
+        legacy_deb.write_bytes(b"legacy deb")
+        legacy_hook.write_bytes(b"legacy hook")
+        source_deb = self.root / "source.deb"
+        source_hook = self.root / "source-hook"
+        source_deb.write_bytes(b"new deb")
+        source_hook.write_bytes(b"new hook")
+
+        with self.session() as session:
+            deb_path = session.stage_file(
+                str(source_deb),
+                "deb",
+                suffix=".deb",
+            )
+            hook_path = session.stage_file(
+                str(source_hook),
+                "hook",
+                executable=True,
+            )
+            self.assertNotEqual(deb_path, "/tmp/temp.deb")
+            self.assertNotEqual(hook_path, "/tmp/HOOK")
+
+        self.assertEqual(legacy_deb.read_bytes(), b"legacy deb")
+        self.assertEqual(legacy_hook.read_bytes(), b"legacy hook")
+        self.assertEqual(
+            tuple((self.fs_dir / "tmp").glob("liveusb-*")),
+            (),
+        )
+        self.assert_runtime_clean()
+
+    def test_staging_cleans_after_ordinary_exception(self):
+        source = self.root / "source.deb"
+        source.write_bytes(b"payload")
+
+        with self.assertRaisesRegex(RuntimeError, "synthetic failure"):
+            with self.session() as session:
+                session.stage_file(
+                    str(source),
+                    "deb",
+                    suffix=".deb",
+                )
+                raise RuntimeError("synthetic failure")
+
+        self.assertEqual(
+            tuple((self.fs_dir / "tmp").glob("liveusb-*")),
+            (),
+        )
+        self.assert_runtime_clean()
+
+    def test_staging_cleans_when_later_mount_acquisition_fails(self):
+        source = self.root / "source.deb"
+        source.write_bytes(b"payload")
+        self.table.fail_next_mount = True
+        session = self.session()
+
+        with self.assertRaises(MountSessionCleanupError):
+            with session:
+                session.stage_file(
+                    str(source),
+                    "deb",
+                    suffix=".deb",
+                )
+                session.mount_sys()
+
+        self.assertEqual(
+            tuple((self.fs_dir / "tmp").glob("liveusb-*")),
+            (),
+        )
+        self.table.remove_path(self.fs_dir / "dev")
+        session.cleanup()
+        self.assert_runtime_clean()
+
+    def test_same_object_cleanup_retry_removes_staged_artifact(self):
+        source = self.root / "source.deb"
+        source.write_bytes(b"payload")
+        session = self.session()
+        session.__enter__()
+        staged = session.stage_file(
+            str(source),
+            "deb",
+            suffix=".deb",
+        )
+        staged_host = self.fs_dir / staged.lstrip("/")
+        real_unlink = os.unlink
+        failed = {"value": False}
+
+        def fail_once(path):
+            if os.path.abspath(path) == str(staged_host) and not failed[
+                "value"
+            ]:
+                failed["value"] = True
+                raise OSError("synthetic unlink failure")
+            return real_unlink(path)
+
+        with mock.patch.object(
+            mount_session.os,
+            "unlink",
+            side_effect=fail_once,
+        ):
+            with self.assertRaises(MountSessionCleanupError):
+                session.cleanup()
+
+        session.cleanup()
+        session.__exit__(None, None, None)
+
+        self.assertFalse(staged_host.exists())
+        self.assert_runtime_clean()
 
 
 if __name__ == "__main__":

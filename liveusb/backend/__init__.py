@@ -2,7 +2,7 @@
 
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .. import config
 from .. import constants
@@ -28,6 +28,7 @@ class Context:
     deb: str = ""
     hook: str = ""
     pic: str = ""
+    runtime_dir: str = "/run/lock/liveusb"
 
     @property
     def fs_dir(self):
@@ -75,12 +76,3 @@ def capture(cmd, **kwargs):
     messages.debug_msg("+ " + " ".join(cmd))
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, **kwargs)
     return result.stdout.strip()
-
-
-def is_mounted(path):
-    """Equivalent of `grep "$path" /proc/mounts`."""
-    try:
-        with open("/proc/mounts") as fh:
-            return any(path in line for line in fh)
-    except OSError:
-        return False

@@ -6,11 +6,31 @@ import shlex
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass
+from typing import Iterable
 
 from . import mounts, chroot, mount_session
 from .. import messages
 
 _PLACEHOLDER_RE = re.compile(r"%[a-zA-Z]")
+
+
+@dataclass(frozen=True)
+class XephyrStopFailure:
+    operation: str
+    error: BaseException
+
+
+class XephyrCleanupError(messages.LiveUSBError):
+    """One ordered error containing Xephyr stop failures."""
+
+    def __init__(self, failures: Iterable[XephyrStopFailure]):
+        self.failures = tuple(failures)
+        details = "; ".join(
+            f"{failure.operation}: {failure.error}"
+            for failure in self.failures
+        )
+        super().__init__(f"Xephyr cleanup failed: {details}")
 
 
 def _list_xsessions(ctx):
@@ -63,20 +83,21 @@ def run_xnest(ctx):
 
     exec_args = [_PLACEHOLDER_RE.sub("", arg) for arg in shlex.split(exec_command)]
 
-    messages.info("Starting virtual desktop")
-    xephyr = subprocess.Popen(
-        [
-            "Xephyr",
-            "-wr",
-            "-ac",
-            "-screen",
-            ctx.resolution,
-            ":9",
-        ]
-    )
-    try:
-        time.sleep(1)
-        with mount_session.MountSession(ctx) as session:
+    with mount_session.MountSession(ctx) as session:
+        messages.info("Starting virtual desktop")
+        xephyr = subprocess.Popen(
+            [
+                "Xephyr",
+                "-wr",
+                "-ac",
+                "-screen",
+                ctx.resolution,
+                ":9",
+            ]
+        )
+        operation_error = None
+        try:
+            time.sleep(1)
             session.allow_local_x_access()
             session.mount_sys()
             session.mount_dbus()
@@ -94,8 +115,16 @@ def run_xnest(ctx):
                 {"DISPLAY": "localhost:9"},
                 exec_args,
             )
-    finally:
-        _stop_xephyr(xephyr)
+        except BaseException as error:
+            operation_error = error
+        if operation_error is not None:
+            try:
+                _stop_xephyr(xephyr)
+            except XephyrCleanupError as cleanup_error:
+                raise cleanup_error from operation_error
+            raise operation_error
+        else:
+            _stop_xephyr(xephyr)
 
     messages.info("Removing some unwanted directories and files")
     root_dir = os.path.join(ctx.fs_dir, "root")
@@ -133,18 +162,56 @@ def run_xnest(ctx):
 
 def _stop_xephyr(xephyr):
     messages.info("Stopping virtual desktop")
+    failures = []
+    try:
+        status = xephyr.poll()
+    except Exception as error:
+        failures.append(XephyrStopFailure("poll", error))
+        status = None
+    if status is not None:
+        if failures:
+            raise XephyrCleanupError(failures)
+        return "already-exited"
+
     try:
         xephyr.terminate()
-    except OSError:
-        return
+    except Exception as error:
+        failures.append(XephyrStopFailure("terminate", error))
+
+    stopped = False
+    stop_method = "terminated"
     try:
         xephyr.wait(timeout=5)
+        stopped = True
     except subprocess.TimeoutExpired:
+        pass
+    except Exception as error:
+        failures.append(XephyrStopFailure("wait-after-terminate", error))
+
+    if not stopped:
+        stop_method = "killed"
         try:
             xephyr.kill()
-        except OSError:
-            return
-        xephyr.wait(timeout=5)
+        except Exception as error:
+            failures.append(XephyrStopFailure("kill", error))
+        try:
+            xephyr.wait(timeout=5)
+            stopped = True
+        except Exception as error:
+            failures.append(XephyrStopFailure("wait-after-kill", error))
+
+    if not stopped and not failures:
+        failures.append(
+            XephyrStopFailure(
+                "prove-exit",
+                messages.LiveUSBError(
+                    "Xephyr termination could not be proven"
+                ),
+            )
+        )
+    if failures:
+        raise XephyrCleanupError(failures)
+    return stop_method
 
 
 def _chroot_run_with_env(ctx, env_vars, args):

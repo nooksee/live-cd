@@ -16,7 +16,7 @@ from . import mounts
 from .. import messages
 
 
-_JOURNAL_VERSION = 2
+_JOURNAL_VERSION = 3
 _JOURNAL_NAME = "mount-session.json"
 _PENDING_MARKER = ".pending-"
 _LOCK_NAME = "operation.lock"
@@ -42,6 +42,7 @@ _DIRECTORY_STAGES = {
 }
 _ARTIFACT_STAGES = {
     "planned",
+    "writing",
     "active",
     "removing",
     "removed",
@@ -140,6 +141,7 @@ class MountSession:
         self._persisted_state = None
         self._journal_active = False
         self._entered = False
+        self._recovering = False
 
     def __del__(self):
         descriptor = getattr(self, "_lock_descriptor", None)
@@ -352,29 +354,54 @@ class MountSession:
             }
             self._state["artifacts"].append(record)
             self._persist_journal()
-            self._create_staged_file(
-                source_descriptor,
-                destination,
-                mode,
+            destination_descriptor = self._create_staged_file(
+                destination
             )
-            identity = self._capture_file_identity(destination)
-            record["identity"] = identity
-            record["stage"] = "active"
-            self._persist_journal()
-            if (
-                identity["sha256"] != expected["sha256"]
-                or identity["size"] != expected["size"]
-                or identity["mode"] != expected["mode"]
-            ):
-                raise MountAcquisitionError(
-                    "Staged artifact does not match its source"
+            try:
+                record["identity"] = (
+                    self._capture_descriptor_identity(
+                        destination_descriptor
+                    )
                 )
+                record["stage"] = "writing"
+                self._persist_journal()
+                os.lseek(source_descriptor, 0, os.SEEK_SET)
+                while True:
+                    chunk = os.read(
+                        source_descriptor,
+                        1024 * 1024,
+                    )
+                    if not chunk:
+                        break
+                    self._write_all(
+                        destination_descriptor,
+                        chunk,
+                    )
+                os.fchmod(destination_descriptor, mode)
+                os.fsync(destination_descriptor)
+                identity = self._capture_descriptor_identity(
+                    destination_descriptor
+                )
+                if (
+                    identity["sha256"] != expected["sha256"]
+                    or identity["size"] != expected["size"]
+                    or identity["mode"] != expected["mode"]
+                ):
+                    raise MountAcquisitionError(
+                        "Staged artifact does not match its source"
+                    )
+                record["identity"] = identity
+                record["stage"] = "active"
+                self._persist_journal()
+            finally:
+                os.close(destination_descriptor)
         finally:
             os.close(source_descriptor)
         return "/" + os.path.relpath(destination, self.ctx.fs_dir)
 
     def cleanup(self):
         acquired_here = False
+        recovering_here = False
         if (
             self._lock_descriptor is not None
             and not self._journal_active
@@ -383,11 +410,18 @@ class MountSession:
         if self._lock_descriptor is None:
             self._acquire_runtime_lock()
             acquired_here = True
+            try:
+                self._reconcile_pending_journal()
+            except BaseException:
+                self._release_runtime_lock_quietly()
+                raise
             if not os.path.lexists(self.journal_path):
                 self._release_runtime_lock()
                 return
             try:
                 self._load_existing_journal()
+                self._recovering = True
+                recovering_here = True
             except BaseException:
                 self._release_runtime_lock_quietly()
                 raise
@@ -467,6 +501,8 @@ class MountSession:
                     self._persist_journal()
                     self._remove_journal()
         finally:
+            if recovering_here:
+                self._recovering = False
             if acquired_here:
                 self._release_runtime_lock_quietly()
         if failures:
@@ -497,6 +533,22 @@ class MountSession:
             include_root=True,
         )
         existing = mounts.mounts_at(before_all, destination)
+        if existing:
+            try:
+                mounts.prove_preexisting_mount(
+                    request,
+                    before_all,
+                )
+            except Exception as error:
+                raise MountAcquisitionError(
+                    "Pre-existing mount equivalence is unproved: "
+                    f"{destination}"
+                ) from error
+        elif before:
+            raise MountAcquisitionError(
+                "Pre-existing nested mount topology is unproved: "
+                f"{destination}"
+            )
         plan = {
             "before": [
                 identity.to_record()
@@ -505,7 +557,14 @@ class MountSession:
             "destination": destination,
             "id": uuid.uuid4().hex,
             "label": request.label,
-            "observed_after": [],
+            "observed_after": (
+                [
+                    identity.to_record()
+                    for identity in before
+                ]
+                if existing
+                else []
+            ),
             "options": list(request.options),
             "owned": [],
             "recursive": request.recursive,
@@ -627,57 +686,45 @@ class MountSession:
         changed = False
 
         for plan in candidate["mounts"]:
-            request = self._request_from_plan(plan)
             before = tuple(
                 mounts.MountIdentity.from_record(record)
                 for record in plan["before"]
             )
-            if plan["stage"] == "ambiguous":
-                raise MountRecoveryError(
-                    f"Ambiguous mount plan remains: {plan['destination']}"
-                )
-            if plan["stage"] in {"planned", "command-started"}:
-                after = mounts.mounts_under(
-                    current,
-                    plan["destination"],
-                    include_root=True,
-                )
-                if plan["stage"] == "planned" and not after:
+            current_scoped = mounts.mounts_under(
+                current,
+                plan["destination"],
+                include_root=True,
+            )
+            if plan["stage"] in {
+                "planned",
+                "command-started",
+                "failed",
+                "ambiguous",
+                "already-present",
+            }:
+                if mounts.identity_map(
+                    current_scoped
+                ) != mounts.identity_map(before):
+                    raise MountRecoveryError(
+                        "Interrupted or unowned mount evidence "
+                        "does not match its pre-state: "
+                        f"{plan['destination']}"
+                    )
+                if plan["stage"] == "already-present":
+                    try:
+                        mounts.prove_preexisting_mount(
+                            self._request_from_plan(plan),
+                            current,
+                        )
+                    except mounts.MountEvidenceError as error:
+                        raise MountRecoveryError(
+                            "Pre-existing mount equivalence "
+                            "cannot be re-established: "
+                            f"{plan['destination']}"
+                        ) from error
+                elif plan["stage"] != "failed":
                     plan["stage"] = "failed"
                     changed = True
-                else:
-                    try:
-                        inferred = mounts.attributable_mounts(
-                            request,
-                            before,
-                            after,
-                        )
-                    except mounts.MountEvidenceError:
-                        if mounts.identity_map(after) == mounts.identity_map(
-                            before
-                        ):
-                            plan["stage"] = "failed"
-                            changed = True
-                        else:
-                            raise MountRecoveryError(
-                                "Interrupted mount acquisition is ambiguous: "
-                                f"{plan['destination']}"
-                            )
-                    else:
-                        plan["observed_after"] = [
-                            identity.to_record()
-                            for identity in after
-                        ]
-                        plan["owned"] = [
-                            {
-                                "identity": identity.to_record(),
-                                "inferred": True,
-                                "stage": "owned",
-                            }
-                            for identity in inferred
-                        ]
-                        plan["stage"] = "owned"
-                        changed = True
 
             if plan["stage"] == "owned":
                 changed = (
@@ -693,11 +740,18 @@ class MountSession:
                 self._preflight_artifact(artifact)
                 or changed
             )
+        active_mount_points = {
+            owned["identity"]["mount_point"]
+            for plan in candidate["mounts"]
+            for owned in plan["owned"]
+            if owned["stage"] in {"owned", "unmounting"}
+        }
         for directory in candidate["directories"]:
             changed = (
                 self._preflight_directory(
                     directory,
                     candidate["directories"],
+                    active_mount_points,
                 )
                 or changed
             )
@@ -783,6 +837,11 @@ class MountSession:
             if identity.key not in known_keys
         )
         if extras:
+            if self._recovering:
+                raise MountRecoveryError(
+                    "Post-interruption nested mount ownership "
+                    "cannot be inferred"
+                )
             current_by_id = {
                 identity.mount_id: identity
                 for identity in current
@@ -823,12 +882,20 @@ class MountSession:
             changed = True
         return changed
 
-    def _preflight_directory(self, record, directory_records):
+    def _preflight_directory(
+        self,
+        record,
+        directory_records,
+        active_mount_points,
+    ):
         self._validate_resource_path(record["path"])
         parent = os.path.dirname(record["path"])
-        if not mounts.directory_identity_matches(
-            parent,
-            record["parent_identity"],
+        if (
+            parent not in active_mount_points
+            and not mounts.directory_identity_matches(
+                parent,
+                record["parent_identity"],
+            )
         ):
             parent_record = next(
                 (
@@ -852,33 +919,11 @@ class MountSession:
         exists = os.path.lexists(record["path"])
         if stage == "planned":
             if exists:
-                if mounts.mounts_under(
-                    self._read_mounts(),
-                    record["path"],
-                    include_root=True,
-                ):
-                    raise MountRecoveryError(
-                        "Planned directory contains mount evidence: "
-                        f"{record['path']}"
-                    )
-                try:
-                    entries = os.listdir(record["path"])
-                except OSError as error:
-                    raise MountRecoveryError(
-                        "Planned directory cannot be inspected: "
-                        f"{record['path']}"
-                    ) from error
-                if entries:
-                    raise MountRecoveryError(
-                        "Planned directory is not empty: "
-                        f"{record['path']}"
-                    )
-                record["identity"] = mounts.node_identity(
-                    record["path"]
+                raise MountRecoveryError(
+                    "Planned directory end state is unproved: "
+                    f"{record['path']}"
                 )
-                record["stage"] = "created"
-            else:
-                record["stage"] = "removed"
+            record["stage"] = "removed"
             return True
         if stage in {"created", "removing"}:
             if not exists:
@@ -888,9 +933,12 @@ class MountSession:
                 raise MountRecoveryError(
                     f"Created directory is absent: {record['path']}"
                 )
-            if not mounts.directory_identity_matches(
-                record["path"],
-                record["identity"],
+            if (
+                record["path"] not in active_mount_points
+                and not mounts.directory_identity_matches(
+                    record["path"],
+                    record["identity"],
+                )
             ):
                 raise MountRecoveryError(
                     "Created directory identity changed: "
@@ -907,32 +955,50 @@ class MountSession:
         stage = record["stage"]
         exists = os.path.lexists(record["path"])
         if stage == "planned":
-            if not exists:
-                record["stage"] = "removed"
-                return True
-            actual = self._capture_file_identity(record["path"])
-            expected = record["expected"]
-            if (
-                actual["mode"] != expected["mode"]
-                or actual["sha256"] != expected["sha256"]
-                or actual["size"] != expected["size"]
-            ):
+            if exists:
                 raise MountRecoveryError(
-                    "Planned artifact evidence is ambiguous: "
+                    "Planned artifact end state is unproved: "
                     f"{record['path']}"
                 )
-            record["identity"] = actual
-            record["stage"] = "active"
+            record["stage"] = "removed"
             return True
-        if stage in {"active", "removing"}:
+        if stage == "writing":
+            if not exists:
+                raise MountRecoveryError(
+                    "Writing artifact disappeared before removal: "
+                    f"{record['path']}"
+                )
+            actual = self._capture_file_identity(record["path"])
+            if not self._same_file_node(
+                actual,
+                record["identity"],
+            ):
+                raise MountRecoveryError(
+                    "Writing artifact inode changed: "
+                    f"{record['path']}"
+                )
+        elif stage == "active":
+            if not exists:
+                raise MountRecoveryError(
+                    "Active artifact disappeared before removal: "
+                    f"{record['path']}"
+                )
+            if self._capture_file_identity(record["path"]) != (
+                record["identity"]
+            ):
+                raise MountRecoveryError(
+                    "Staged artifact identity changed: "
+                    f"{record['path']}"
+                )
+        elif stage == "removing":
             if not exists:
                 record["stage"] = "removed"
                 return True
-            if self._capture_file_identity(
-                record["path"]
-            ) != record["identity"]:
+            if self._capture_file_identity(record["path"]) != (
+                record["identity"]
+            ):
                 raise MountRecoveryError(
-                    "Staged artifact identity changed: "
+                    "Removing artifact identity changed: "
                     f"{record['path']}"
                 )
         elif stage == "removed" and exists:
@@ -952,12 +1018,8 @@ class MountSession:
                 x_record["stage"] = "failed"
                 x_record["mutation"] = False
                 return True
-            if current.enabled and current.local_present:
-                x_record["stage"] = "owned"
-                x_record["mutation"] = True
-                return True
             raise MountRecoveryError(
-                "Interrupted X grant has ambiguous state"
+                "Interrupted X grant ownership is unproved"
             )
         if stage == "owned":
             current = self._query_x_state()
@@ -1037,6 +1099,18 @@ class MountSession:
                 artifact["stage"] = "removed"
                 self._persist_journal()
                 return
+        if artifact["stage"] == "writing":
+            actual = self._capture_file_identity(
+                artifact["path"]
+            )
+            if not self._same_file_node(
+                actual,
+                artifact["identity"],
+            ):
+                raise MountRecoveryError(
+                    "Writing artifact inode changed before removal"
+                )
+            artifact["identity"] = actual
         artifact["stage"] = "removing"
         self._persist_journal()
         if self._capture_file_identity(
@@ -1051,6 +1125,14 @@ class MountSession:
         )
         artifact["stage"] = "removed"
         self._persist_journal()
+
+    @staticmethod
+    def _same_file_node(first, second):
+        fields = ("dev", "ino", "kind", "nlink", "owner")
+        return all(
+            first[field] == second[field]
+            for field in fields
+        )
 
     def _cleanup_directory(self, directory):
         if directory["stage"] == "removing":
@@ -1240,31 +1322,24 @@ class MountSession:
             record["stage"] = "created"
             self._persist_journal()
 
-    def _create_staged_file(
-        self,
-        source_descriptor,
-        destination,
-        mode,
-    ):
+    def _create_staged_file(self, destination):
         mounts.validate_mount_destination(
             self.ctx,
             destination,
         )
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         descriptor = os.open(destination, flags, 0o600)
         try:
-            while True:
-                chunk = os.read(source_descriptor, 1024 * 1024)
-                if not chunk:
-                    break
-                self._write_all(descriptor, chunk)
-            os.fchmod(descriptor, mode)
             os.fsync(descriptor)
-        finally:
+            self._fsync_directory(
+                os.path.dirname(destination)
+            )
+        except BaseException:
             os.close(descriptor)
-        self._fsync_directory(os.path.dirname(destination))
+            raise
+        return descriptor
 
     def _open_source_file(self, path):
         flags = os.O_RDONLY
@@ -1290,21 +1365,30 @@ class MountSession:
             flags |= os.O_NOFOLLOW
         descriptor = os.open(path, flags)
         try:
-            stat_result = os.fstat(descriptor)
-            if not stat.S_ISREG(stat_result.st_mode):
-                raise MountRecoveryError(
-                    f"Staged artifact is not a regular file: {path}"
-                )
-            return {
-                "dev": stat_result.st_dev,
-                "ino": stat_result.st_ino,
-                "kind": "file",
-                "mode": stat.S_IMODE(stat_result.st_mode),
-                "sha256": self._hash_descriptor(descriptor),
-                "size": stat_result.st_size,
-            }
+            return self._capture_descriptor_identity(descriptor)
         finally:
             os.close(descriptor)
+
+    def _capture_descriptor_identity(self, descriptor):
+        stat_result = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(stat_result.st_mode)
+            or stat_result.st_nlink != 1
+            or stat_result.st_uid != os.geteuid()
+        ):
+            raise MountRecoveryError(
+                "Staged artifact custody is invalid"
+            )
+        return {
+            "dev": stat_result.st_dev,
+            "ino": stat_result.st_ino,
+            "kind": "file",
+            "mode": stat.S_IMODE(stat_result.st_mode),
+            "nlink": stat_result.st_nlink,
+            "owner": stat_result.st_uid,
+            "sha256": self._hash_descriptor(descriptor),
+            "size": stat_result.st_size,
+        }
 
     @staticmethod
     def _hash_descriptor(descriptor):
@@ -1386,6 +1470,7 @@ class MountSession:
                 "token": uuid.uuid4().hex,
             },
             "phase": "active",
+            "previous_sha256": None,
             "roots": {
                 "filesystem": self.fs_root,
                 "work": self.work_root,
@@ -1402,15 +1487,15 @@ class MountSession:
         self._persist_journal()
 
     def _recover_existing_transaction(self):
-        pending = self._pending_journal_paths()
-        if pending:
-            raise MountRecoveryError(
-                "Pending mount-session journal metadata is ambiguous"
-            )
+        self._reconcile_pending_journal()
         if not os.path.lexists(self.journal_path):
             return
         self._load_existing_journal()
-        self.cleanup()
+        self._recovering = True
+        try:
+            self.cleanup()
+        finally:
+            self._recovering = False
         self._state = None
         self._persisted_state = None
         self._journal_active = False
@@ -1431,12 +1516,16 @@ class MountSession:
             raise MountRecoveryError(
                 "Pending journal metadata is ambiguous"
             )
+        previous_digest = None
         if self._journal_active:
-            current = self._read_journal()
+            current, current_raw = self._read_journal_with_raw()
             if current != self._persisted_state:
                 raise MountRecoveryError(
                     "Mount-session journal identity changed"
                 )
+            previous_digest = hashlib.sha256(
+                current_raw
+            ).hexdigest()
         elif os.path.lexists(self.journal_path):
             raise MountRecoveryError(
                 "Unexpected mount-session journal exists"
@@ -1444,6 +1533,13 @@ class MountSession:
         self._validate_state(self._state)
         next_state = copy.deepcopy(self._state)
         next_state["sequence"] += 1
+        next_state["previous_sha256"] = previous_digest
+        self._validate_state(next_state)
+        raw = self._encode_json(next_state)
+        if len(raw) > _MAX_METADATA_BYTES:
+            raise MountRecoveryError(
+                "Mount-session journal exceeds the writer limit"
+            )
         pending_path = (
             self.pending_prefix
             + next_state["owner"]["token"]
@@ -1455,20 +1551,28 @@ class MountSession:
             flags |= os.O_NOFOLLOW
         descriptor = os.open(pending_path, flags, 0o600)
         try:
-            self._write_all(
-                descriptor,
-                self._encode_json(next_state),
+            self._validate_secure_file_state(
+                os.fstat(descriptor),
+                "Pending journal",
             )
+            self._write_all(descriptor, raw)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        pending_state = os.lstat(pending_path)
+        self._validate_secure_file_state(
+            pending_state,
+            "Pending journal",
+        )
         os.replace(pending_path, self.journal_path)
         self._fsync_directory(self.runtime_dir)
         self._state["sequence"] = next_state["sequence"]
+        self._state["previous_sha256"] = previous_digest
         self._persisted_state = copy.deepcopy(self._state)
         self._journal_active = True
 
     def _remove_journal(self):
+        self._validate_runtime_lock_identity()
         if self._pending_journal_paths():
             raise MountRecoveryError(
                 "Pending journal metadata prevents finalization"
@@ -1484,44 +1588,213 @@ class MountSession:
         self._persisted_state = None
 
     def _read_journal(self):
-        stat_result = os.lstat(self.journal_path)
-        if (
-            not stat.S_ISREG(stat_result.st_mode)
-            or stat_result.st_size > _MAX_METADATA_BYTES
-        ):
+        value, _raw = self._read_journal_with_raw()
+        return value
+
+    def _read_journal_with_raw(self):
+        return self._read_metadata_file(
+            self.journal_path,
+            "Mount-session journal",
+        )
+
+    def _read_metadata_file(self, path, label):
+        stat_result = os.lstat(path)
+        self._validate_secure_file_state(
+            stat_result,
+            label,
+        )
+        if stat_result.st_size > _MAX_METADATA_BYTES:
             raise MountRecoveryError(
-                "Mount-session journal node is invalid"
+                f"{label} is too large"
             )
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        descriptor = os.open(self.journal_path, flags)
+        descriptor = os.open(path, flags)
         try:
             descriptor_state = os.fstat(descriptor)
+            self._validate_secure_file_state(
+                descriptor_state,
+                label,
+            )
             if (
-                not stat.S_ISREG(descriptor_state.st_mode)
-                or descriptor_state.st_dev != stat_result.st_dev
+                descriptor_state.st_dev != stat_result.st_dev
                 or descriptor_state.st_ino != stat_result.st_ino
                 or descriptor_state.st_size
                 != stat_result.st_size
             ):
                 raise MountRecoveryError(
-                    "Mount-session journal identity changed"
+                    f"{label} identity changed"
                 )
-            raw = os.read(descriptor, _MAX_METADATA_BYTES + 1)
+            chunks = []
+            total = 0
+            while True:
+                chunk = os.read(
+                    descriptor,
+                    min(
+                        1024 * 1024,
+                        _MAX_METADATA_BYTES + 1 - total,
+                    ),
+                )
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > _MAX_METADATA_BYTES:
+                    break
+            raw = b"".join(chunks)
         finally:
             os.close(descriptor)
         if len(raw) > _MAX_METADATA_BYTES:
             raise MountRecoveryError(
-                "Mount-session journal is too large"
+                f"{label} is too large"
             )
         try:
             value = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise MountRecoveryError(
-                "Mount-session journal is corrupt"
+                f"{label} is corrupt"
             ) from error
-        return value
+        return value, raw
+
+    def _reconcile_pending_journal(self):
+        self._validate_runtime_lock_identity()
+        pending_paths = self._pending_journal_paths()
+        if not pending_paths:
+            return
+        if len(pending_paths) != 1:
+            raise MountRecoveryError(
+                "Pending journal evidence is multiple or ambiguous"
+            )
+        if not os.path.lexists(self.journal_path):
+            raise MountRecoveryError(
+                "Pending journal lacks a committed predecessor"
+            )
+        current, current_raw = self._read_journal_with_raw()
+        self._validate_state(current)
+        pending_path = pending_paths[0]
+        candidate, _candidate_raw = self._read_metadata_file(
+            pending_path,
+            "Pending journal",
+        )
+        self._validate_state(candidate)
+        self._validate_pending_transition(
+            current,
+            current_raw,
+            candidate,
+            pending_path,
+        )
+        os.replace(pending_path, self.journal_path)
+        self._fsync_directory(self.runtime_dir)
+
+    def _validate_pending_transition(
+        self,
+        current,
+        current_raw,
+        candidate,
+        pending_path,
+    ):
+        token = current["owner"]["token"]
+        prefix = (
+            os.path.basename(self.pending_prefix)
+            + token
+            + "-"
+        )
+        name = os.path.basename(pending_path)
+        suffix = name[len(prefix):] if name.startswith(prefix) else ""
+        if not self._is_hex(suffix, 32):
+            raise MountRecoveryError(
+                "Pending journal filename is not in transaction custody"
+            )
+        expected_previous = hashlib.sha256(
+            current_raw
+        ).hexdigest()
+        if (
+            candidate["version"] != current["version"]
+            or candidate["owner"] != current["owner"]
+            or candidate["roots"] != current["roots"]
+            or candidate["sequence"] != current["sequence"] + 1
+            or candidate["previous_sha256"] != expected_previous
+        ):
+            raise MountRecoveryError(
+                "Pending journal does not prove the next sequence"
+            )
+        allowed_phases = {
+            "active": {"active", "cleaning"},
+            "cleaning": {"cleaning", "complete"},
+            "complete": set(),
+        }
+        if candidate["phase"] not in allowed_phases[current["phase"]]:
+            raise MountRecoveryError(
+                "Pending journal phase transition is invalid"
+            )
+        added = 0
+        for field in ("mounts", "directories", "artifacts"):
+            previous_records = current[field]
+            next_records = candidate[field]
+            if (
+                len(next_records) < len(previous_records)
+                or len(next_records) > len(previous_records) + 1
+            ):
+                raise MountRecoveryError(
+                    "Pending journal resource transition is invalid"
+                )
+            added += len(next_records) - len(previous_records)
+        if added > 1:
+            raise MountRecoveryError(
+                "Pending journal appends multiple resources"
+            )
+        for previous, next_record in zip(
+            current["mounts"],
+            candidate["mounts"],
+        ):
+            stable = (
+                "before",
+                "destination",
+                "id",
+                "label",
+                "options",
+                "recursive",
+                "source",
+            )
+            if any(
+                previous[field] != next_record[field]
+                for field in stable
+            ):
+                raise MountRecoveryError(
+                    "Pending journal changes immutable mount evidence"
+                )
+        for previous, next_record in zip(
+            current["directories"],
+            candidate["directories"],
+        ):
+            if (
+                previous["path"] != next_record["path"]
+                or previous["parent_identity"]
+                != next_record["parent_identity"]
+            ):
+                raise MountRecoveryError(
+                    "Pending journal changes directory custody"
+                )
+        for previous, next_record in zip(
+            current["artifacts"],
+            candidate["artifacts"],
+        ):
+            stable = ("expected", "path", "purpose")
+            if any(
+                previous[field] != next_record[field]
+                for field in stable
+            ):
+                raise MountRecoveryError(
+                    "Pending journal changes artifact custody"
+                )
+        if (
+            current["x"]["before"] is not None
+            and candidate["x"]["before"] != current["x"]["before"]
+        ):
+            raise MountRecoveryError(
+                "Pending journal changes X pre-state"
+            )
 
     def _validate_state(self, state):
         expected = {
@@ -1530,6 +1803,7 @@ class MountSession:
             "mounts",
             "owner",
             "phase",
+            "previous_sha256",
             "roots",
             "sequence",
             "version",
@@ -1543,6 +1817,17 @@ class MountSession:
             or state["sequence"] < 0
             or state["phase"]
             not in {"active", "cleaning", "complete"}
+            or (
+                state["sequence"] <= 1
+                and state["previous_sha256"] is not None
+            )
+            or (
+                state["sequence"] > 1
+                and not self._is_hex(
+                    state["previous_sha256"],
+                    64,
+                )
+            )
         ):
             raise MountRecoveryError(
                 "Mount-session journal schema is invalid"
@@ -1563,7 +1848,10 @@ class MountSession:
                 "Mount-session resource arrays are invalid"
             )
         self._validate_mount_records(state["mounts"])
-        self._validate_artifact_records(state["artifacts"])
+        self._validate_artifact_records(
+            state["artifacts"],
+            state["owner"]["token"],
+        )
         self._validate_directory_records(
             state["directories"],
             state["mounts"],
@@ -1629,26 +1917,15 @@ class MountSession:
                 plan["destination"]
             )
             request = self._request_from_plan(plan)
-            allowed = mounts.system_mount_requests(self.ctx)
+            allowed = mounts.authorized_mount_requests(self.ctx)
             if not any(
                 self._request_signature(request)
                 == self._request_signature(candidate)
                 for candidate in allowed
             ):
-                try:
-                    dbus_allowed = mounts.dbus_mount_requests(self.ctx)
-                except mounts.MountEvidenceError as error:
-                    raise MountRecoveryError(
-                        "D-Bus mount-plan context is invalid"
-                    ) from error
-                if not any(
-                    self._request_signature(request)
-                    == self._request_signature(candidate)
-                    for candidate in dbus_allowed
-                ):
-                    raise MountRecoveryError(
-                        "Mount plan is outside the authorized plan set"
-                    )
+                raise MountRecoveryError(
+                    "Mount plan is outside the authorized plan set"
+                )
             if (
                 plan["stage"] == "owned"
                 and not plan["owned"]
@@ -1776,9 +2053,8 @@ class MountSession:
                     "Active directory identity is missing"
                 )
 
-    def _validate_artifact_records(self, records):
+    def _validate_artifact_records(self, records, token):
         paths = set()
-        token = self._state["owner"]["token"]
         for record in records:
             if (
                 not isinstance(record, dict)
@@ -1817,7 +2093,11 @@ class MountSession:
             if record["identity"] is not None:
                 self._validate_file_identity(record["identity"])
             if (
-                record["stage"] in {"active", "removing"}
+                record["stage"] in {
+                    "writing",
+                    "active",
+                    "removing",
+                }
                 and record["identity"] is None
             ):
                 raise MountRecoveryError(
@@ -1894,6 +2174,8 @@ class MountSession:
                 "ino",
                 "kind",
                 "mode",
+                "nlink",
+                "owner",
                 "sha256",
                 "size",
             }
@@ -1901,8 +2183,17 @@ class MountSession:
             or any(
                 type(value[field]) is not int
                 or value[field] < 0
-                for field in ("dev", "ino", "mode", "size")
+                for field in (
+                    "dev",
+                    "ino",
+                    "mode",
+                    "nlink",
+                    "owner",
+                    "size",
+                )
             )
+            or value["nlink"] != 1
+            or value["owner"] != os.geteuid()
             or not MountSession._is_hex(value["sha256"], 64)
         ):
             raise MountRecoveryError(
@@ -1948,9 +2239,21 @@ class MountSession:
         descriptor = os.open(self.lock_path, flags, 0o600)
         try:
             stat_result = os.fstat(descriptor)
-            if not stat.S_ISREG(stat_result.st_mode):
+            self._validate_secure_file_state(
+                stat_result,
+                "Runtime lock",
+            )
+            path_result = os.lstat(self.lock_path)
+            self._validate_secure_file_state(
+                path_result,
+                "Runtime lock",
+            )
+            if (
+                stat_result.st_dev != path_result.st_dev
+                or stat_result.st_ino != path_result.st_ino
+            ):
                 raise MountRecoveryError(
-                    "Runtime lock is not a regular file"
+                    "Runtime lock identity changed during acquisition"
                 )
             try:
                 fcntl.flock(
@@ -1972,13 +2275,56 @@ class MountSession:
                 os.close(descriptor)
 
     def _ensure_runtime_directory(self):
-        os.makedirs(self.runtime_dir, mode=0o700, exist_ok=True)
+        if (
+            not os.path.isabs(self.runtime_dir)
+            or os.path.normpath(self.runtime_dir) != self.runtime_dir
+            or self._path_within(
+                self.work_root,
+                self.runtime_dir,
+                include_root=True,
+            )
+        ):
+            raise MountRecoveryError(
+                "Runtime custody path is invalid"
+            )
+        components = self.runtime_dir.split(os.sep)
+        cursor = os.sep
+        missing = []
+        for component in components:
+            if not component:
+                continue
+            cursor = os.path.join(cursor, component)
+            if missing:
+                missing.append(cursor)
+                continue
+            if not os.path.lexists(cursor):
+                missing.append(cursor)
+                continue
+            state = os.lstat(cursor)
+            if (
+                not stat.S_ISDIR(state.st_mode)
+                or stat.S_ISLNK(state.st_mode)
+            ):
+                raise MountRecoveryError(
+                    "Runtime parent chain is not a literal directory chain"
+                )
+        for path in missing:
+            parent = os.path.dirname(path)
+            parent_state = os.lstat(parent)
+            if not stat.S_ISDIR(parent_state.st_mode):
+                raise MountRecoveryError(
+                    "Runtime parent changed before creation"
+                )
+            os.mkdir(path, 0o700)
+            self._fsync_directory(parent)
         stat_result = os.lstat(self.runtime_dir)
         if (
             not stat.S_ISDIR(stat_result.st_mode)
-            or os.path.islink(self.runtime_dir)
+            or stat.S_ISLNK(stat_result.st_mode)
             or os.path.realpath(self.runtime_dir)
             != self.runtime_dir
+            or stat_result.st_uid != os.geteuid()
+            or stat.S_IMODE(stat_result.st_mode) != 0o700
         ):
             raise MountRecoveryError(
                 "Runtime custody directory is invalid"
@@ -2024,13 +2370,31 @@ class MountSession:
             descriptor_state.st_ino,
         )
         if (
-            not stat.S_ISREG(path_state.st_mode)
-            or not stat.S_ISREG(descriptor_state.st_mode)
-            or path_identity != self._lock_identity
+            path_identity != self._lock_identity
             or descriptor_identity != self._lock_identity
         ):
             raise MountRecoveryError(
                 "Runtime lock identity changed"
+            )
+        self._validate_secure_file_state(
+            path_state,
+            "Runtime lock",
+        )
+        self._validate_secure_file_state(
+            descriptor_state,
+            "Runtime lock",
+        )
+
+    @staticmethod
+    def _validate_secure_file_state(state, label):
+        if (
+            not stat.S_ISREG(state.st_mode)
+            or state.st_uid != os.geteuid()
+            or stat.S_IMODE(state.st_mode) != 0o600
+            or state.st_nlink != 1
+        ):
+            raise MountRecoveryError(
+                f"{label} custody is invalid"
             )
 
     def _release_runtime_lock_quietly(self):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -198,7 +199,7 @@ class MountRecoveryTests(unittest.TestCase):
         self.assertEqual(self.table.identities, [])
         self.assert_hard_recovery_clean()
 
-    def test_planned_directory_is_recovered_after_creation_interruption(self):
+    def test_planned_directory_end_state_is_not_adopted(self):
         os.rmdir(self.fs_dir / "tmp")
         source = self.root / "source.deb"
         source.write_bytes(b"directory crash payload")
@@ -227,6 +228,20 @@ class MountRecoveryTests(unittest.TestCase):
         self.abandon(abandoned)
 
         self.assertTrue((self.fs_dir / "tmp").is_dir())
+        journal_before = self.journal_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "end state is unproved",
+        ):
+            self.session().__enter__()
+
+        self.assertEqual(
+            self.journal_path.read_bytes(),
+            journal_before,
+        )
+        os.rmdir(self.fs_dir / "tmp")
+
         with self.session():
             pass
 
@@ -234,9 +249,10 @@ class MountRecoveryTests(unittest.TestCase):
         self.assert_hard_recovery_clean()
 
     def test_corrupt_journal_is_preserved_byte_identically(self):
-        self.runtime_dir.mkdir()
+        self.runtime_dir.mkdir(mode=0o700)
         raw = b"{corrupt journal\n"
         self.journal_path.write_bytes(raw)
+        self.journal_path.chmod(0o600)
 
         with self.assertRaisesRegex(
             MountRecoveryError,
@@ -263,6 +279,7 @@ class MountRecoveryTests(unittest.TestCase):
             / "mount-session.json.pending-synthetic"
         )
         pending.write_bytes(b"pending evidence")
+        pending.chmod(0o600)
         journal_before = self.journal_path.read_bytes()
         artifact_before = self.staged_paths()[0].read_bytes()
 
@@ -463,6 +480,527 @@ class MountRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(self.staged_paths(), ())
         self.assertEqual(self.table.mount_commands, [])
+
+    def test_interrupted_mount_with_changed_evidence_is_not_adopted(self):
+        def interrupt_after_mount(command):
+            self.table.mount(command)
+            raise KeyboardInterrupt(
+                "synthetic post-mount interruption"
+            )
+
+        abandoned = MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=interrupt_after_mount,
+            unmount_runner=self.table.unmount,
+            x_query=self.x_access.query,
+            x_mutator=self.x_access.mutate,
+        )
+        abandoned.__enter__()
+        with self.assertRaises(KeyboardInterrupt):
+            abandoned.mount_sys()
+        self.abandon(abandoned)
+        journal_before = self.journal_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "does not match its pre-state",
+        ):
+            self.session().__enter__()
+
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assertEqual(
+            self.journal_path.read_bytes(),
+            journal_before,
+        )
+        self.table.remove_path(self.fs_dir / "dev")
+
+        with self.session():
+            pass
+
+        self.assert_hard_recovery_clean()
+
+    def test_interrupted_mount_at_prestate_resolves_without_ownership(self):
+        def interrupt_without_mount(_command):
+            raise KeyboardInterrupt(
+                "synthetic pre-mount interruption"
+            )
+
+        abandoned = MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=interrupt_without_mount,
+            unmount_runner=self.table.unmount,
+            x_query=self.x_access.query,
+            x_mutator=self.x_access.mutate,
+        )
+        abandoned.__enter__()
+        with self.assertRaises(KeyboardInterrupt):
+            abandoned.mount_sys()
+        self.abandon(abandoned)
+
+        with self.session():
+            pass
+
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assert_hard_recovery_clean()
+
+    def test_planned_mount_at_prestate_resolves_without_ownership(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        with mock.patch.object(
+            abandoned,
+            "_ensure_directory",
+            side_effect=KeyboardInterrupt(
+                "synthetic pre-directory interruption"
+            ),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                abandoned.mount_sys()
+        self.abandon(abandoned)
+
+        with self.session():
+            pass
+
+        self.assertEqual(self.table.mount_commands, [])
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assert_hard_recovery_clean()
+
+    def test_partial_writing_artifact_is_recovered_by_exact_inode(self):
+        payload = b"partial child payload"
+        source = self.root / "source.deb"
+        source.write_bytes(payload)
+        child = os.fork()
+        if child == 0:
+            session = self.session()
+            session.__enter__()
+            real_write_all = session._write_all
+
+            def interrupt_copy(descriptor, raw):
+                if raw == payload:
+                    os.write(descriptor, raw[:5])
+                    os._exit(0)
+                return real_write_all(descriptor, raw)
+
+            with mock.patch.object(
+                session,
+                "_write_all",
+                side_effect=interrupt_copy,
+            ):
+                session.stage_file(
+                    str(source),
+                    "deb",
+                    suffix=".deb",
+                )
+            os._exit(3)
+
+        waited, status = os.waitpid(child, 0)
+        self.assertEqual(waited, child)
+        self.assertEqual(os.WEXITSTATUS(status), 0)
+        self.assertEqual(len(self.staged_paths()), 1)
+
+        with self.session():
+            pass
+
+        self.assert_hard_recovery_clean()
+
+    def test_planned_artifact_end_state_is_not_adopted(self):
+        source = self.root / "source.deb"
+        source.write_bytes(b"planned artifact")
+        child = os.fork()
+        if child == 0:
+            session = self.session()
+            session.__enter__()
+            with mock.patch.object(
+                session,
+                "_capture_descriptor_identity",
+                side_effect=lambda _descriptor: os._exit(0),
+            ):
+                session.stage_file(
+                    str(source),
+                    "deb",
+                    suffix=".deb",
+                )
+            os._exit(3)
+
+        waited, status = os.waitpid(child, 0)
+        self.assertEqual(waited, child)
+        self.assertEqual(os.WEXITSTATUS(status), 0)
+        artifact = self.staged_paths()[0]
+        journal_before = self.journal_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "end state is unproved",
+        ):
+            self.session().__enter__()
+
+        self.assertEqual(
+            self.journal_path.read_bytes(),
+            journal_before,
+        )
+        os.unlink(artifact)
+
+        with self.session():
+            pass
+
+        self.assert_hard_recovery_clean()
+
+    def test_grant_planned_x_state_is_not_adopted(self):
+        x_access = FakeXAccess(
+            enabled=True,
+            local_present=False,
+        )
+        abandoned = MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=self.table.mount,
+            unmount_runner=self.table.unmount,
+            x_query=x_access.query,
+            x_mutator=x_access.mutate,
+        )
+        abandoned.__enter__()
+        real_persist = abandoned._persist_journal
+
+        def interrupt_owned_persist():
+            if abandoned._state["x"]["stage"] == "owned":
+                raise KeyboardInterrupt(
+                    "synthetic post-grant interruption"
+                )
+            return real_persist()
+
+        with mock.patch.object(
+            abandoned,
+            "_persist_journal",
+            side_effect=interrupt_owned_persist,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                abandoned.allow_local_x_access()
+        self.abandon(abandoned)
+        journal_before = self.journal_path.read_bytes()
+        recovery = MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=self.table.mount,
+            unmount_runner=self.table.unmount,
+            x_query=x_access.query,
+            x_mutator=x_access.mutate,
+        )
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "ownership is unproved",
+        ):
+            recovery.__enter__()
+
+        self.assertEqual(x_access.mutations, [True])
+        self.assertEqual(
+            self.journal_path.read_bytes(),
+            journal_before,
+        )
+        x_access.state = mount_session.mounts.XAccessState(
+            enabled=True,
+            local_present=False,
+        )
+
+        with MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=self.table.mount,
+            unmount_runner=self.table.unmount,
+            x_query=x_access.query,
+            x_mutator=x_access.mutate,
+        ):
+            pass
+
+        self.assert_hard_recovery_clean()
+
+    def test_recorded_x_ownership_is_restored_by_fresh_instance(self):
+        x_access = FakeXAccess(
+            enabled=True,
+            local_present=False,
+        )
+        abandoned = MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=self.table.mount,
+            unmount_runner=self.table.unmount,
+            x_query=x_access.query,
+            x_mutator=x_access.mutate,
+        )
+        abandoned.__enter__()
+        abandoned.allow_local_x_access()
+        self.abandon(abandoned)
+
+        with MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=self.table.mount,
+            unmount_runner=self.table.unmount,
+            x_query=x_access.query,
+            x_mutator=x_access.mutate,
+        ):
+            pass
+
+        self.assertEqual(x_access.mutations, [True, False])
+        self.assertFalse(x_access.state.local_present)
+        self.assert_hard_recovery_clean()
+
+    def test_simultaneous_child_process_holds_runtime_flock(self):
+        ready_read, ready_write = os.pipe()
+        release_read, release_write = os.pipe()
+        child = os.fork()
+        if child == 0:
+            os.close(ready_read)
+            os.close(release_write)
+            session = self.session()
+            session.__enter__()
+            os.write(ready_write, b"1")
+            os.read(release_read, 1)
+            session.__exit__(None, None, None)
+            os._exit(0)
+
+        os.close(ready_write)
+        os.close(release_read)
+        try:
+            self.assertEqual(os.read(ready_read, 1), b"1")
+            with self.assertRaisesRegex(
+                MountRecoveryError,
+                "holds the runtime lock",
+            ):
+                self.session().__enter__()
+            os.write(release_write, b"1")
+            waited, status = os.waitpid(child, 0)
+            self.assertEqual(waited, child)
+            self.assertEqual(os.WEXITSTATUS(status), 0)
+        finally:
+            os.close(ready_read)
+            os.close(release_write)
+
+        self.assert_hard_recovery_clean()
+
+    def test_valid_next_sequence_pending_journal_is_reconciled(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        abandoned._state["phase"] = "cleaning"
+        with mock.patch.object(
+            mount_session.os,
+            "replace",
+            side_effect=OSError("synthetic replace interruption"),
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                "synthetic replace interruption",
+            ):
+                abandoned._persist_journal()
+        self.abandon(abandoned)
+        self.assertEqual(len(self.pending_paths()), 1)
+
+        with self.session():
+            pass
+
+        self.assert_hard_recovery_clean()
+
+    def test_multiple_pending_journals_are_preserved(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        self.abandon(abandoned)
+        first = (
+            self.runtime_dir
+            / "mount-session.json.pending-first"
+        )
+        second = (
+            self.runtime_dir
+            / "mount-session.json.pending-second"
+        )
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+        first.chmod(0o600)
+        second.chmod(0o600)
+        journal_before = self.journal_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "multiple or ambiguous",
+        ):
+            self.session().__enter__()
+
+        self.assertEqual(
+            self.journal_path.read_bytes(),
+            journal_before,
+        )
+        self.assertEqual(first.read_bytes(), b"first")
+        self.assertEqual(second.read_bytes(), b"second")
+
+    def test_mismatched_next_sequence_pending_is_preserved(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        abandoned._state["phase"] = "cleaning"
+        with mock.patch.object(
+            mount_session.os,
+            "replace",
+            side_effect=OSError("synthetic replace interruption"),
+        ):
+            with self.assertRaises(OSError):
+                abandoned._persist_journal()
+        self.abandon(abandoned)
+        pending = self.pending_paths()[0]
+        candidate = json.loads(
+            pending.read_text(encoding="utf-8")
+        )
+        candidate["previous_sha256"] = "0" * 64
+        pending.write_bytes(
+            mount_session.MountSession._encode_json(candidate)
+        )
+        pending.chmod(0o600)
+        journal_before = self.journal_path.read_bytes()
+        pending_before = pending.read_bytes()
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "does not prove the next sequence",
+        ):
+            self.session().__enter__()
+
+        self.assertEqual(
+            self.journal_path.read_bytes(),
+            journal_before,
+        )
+        self.assertEqual(pending.read_bytes(), pending_before)
+
+    def test_writer_rejects_metadata_larger_than_reader_limit(self):
+        session = self.session()
+        session.__enter__()
+        oversized = b"x" * (
+            mount_session._MAX_METADATA_BYTES + 1
+        )
+
+        with mock.patch.object(
+            session,
+            "_encode_json",
+            return_value=oversized,
+        ):
+            with self.assertRaisesRegex(
+                MountRecoveryError,
+                "writer limit",
+            ):
+                session._persist_journal()
+
+        self.assertEqual(self.pending_paths(), ())
+        session.__exit__(None, None, None)
+        self.assert_hard_recovery_clean()
+
+    def test_runtime_directory_requires_mode_0700(self):
+        self.runtime_dir.mkdir(mode=0o755)
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "custody directory is invalid",
+        ):
+            self.session().__enter__()
+
+        self.assertFalse(
+            (self.runtime_dir / "operation.lock").exists()
+        )
+
+    def test_runtime_symlink_parent_is_rejected_before_creation(self):
+        real_parent = self.root / "real-runtime-parent"
+        real_parent.mkdir(mode=0o700)
+        linked_parent = self.root / "linked-runtime-parent"
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+        escaped_runtime = linked_parent / "runtime"
+        context = Context(
+            work_dir=str(self.work_dir),
+            mount_dir=str(self.root / "mount"),
+            runtime_dir=str(escaped_runtime),
+        )
+        session = MountSession(
+            context,
+            mountinfo_reader=self.table.reader,
+            mount_runner=self.table.mount,
+            unmount_runner=self.table.unmount,
+            x_query=self.x_access.query,
+            x_mutator=self.x_access.mutate,
+        )
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "literal directory chain",
+        ):
+            session.__enter__()
+
+        self.assertFalse((real_parent / "runtime").exists())
+
+    def test_runtime_lock_requires_mode_0600_and_single_link(self):
+        self.runtime_dir.mkdir(mode=0o700)
+        lock_path = self.runtime_dir / "operation.lock"
+        lock_path.write_bytes(b"lock")
+        lock_path.chmod(0o644)
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "Runtime lock custody is invalid",
+        ):
+            self.session().__enter__()
+
+        lock_path.chmod(0o600)
+        hard_link = self.runtime_dir / "lock-link"
+        os.link(lock_path, hard_link)
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "Runtime lock custody is invalid",
+        ):
+            self.session().__enter__()
+
+    def test_journal_requires_mode_0600_and_single_link(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        self.abandon(abandoned)
+        self.journal_path.chmod(0o644)
+        journal_before = self.journal_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "journal custody is invalid",
+        ):
+            self.session().__enter__()
+
+        self.assertEqual(
+            self.journal_path.read_bytes(),
+            journal_before,
+        )
+        self.journal_path.chmod(0o600)
+        hard_link = self.runtime_dir / "journal-link"
+        os.link(self.journal_path, hard_link)
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "journal custody is invalid",
+        ):
+            self.session().__enter__()
+
+    def test_persisted_legacy_dbus_plan_survives_topology_change(self):
+        for path in (
+            self.fs_dir / "var/lib/dbus",
+            self.fs_dir / "var/run/dbus",
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+        abandoned = self.session()
+        abandoned.__enter__()
+        abandoned.mount_dbus()
+        self.abandon(abandoned)
+        shutil.rmtree(self.fs_dir / "var/run")
+        (self.fs_dir / "run/dbus").mkdir(parents=True)
+        (self.fs_dir / "var/run").symlink_to(
+            "../run",
+            target_is_directory=True,
+        )
+
+        with self.session():
+            pass
+
+        self.assertEqual(self.table.identities, [])
+        self.assert_hard_recovery_clean()
 
 
 if __name__ == "__main__":

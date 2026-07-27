@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -451,12 +452,7 @@ def system_mount_requests(ctx):
 
 
 def dbus_mount_requests(ctx):
-    first = MountRequest(
-        source="/var/lib/dbus",
-        destination=os.path.join(ctx.fs_dir, "var", "lib", "dbus"),
-        label="/var/lib/dbus",
-        options=("--bind",),
-    )
+    first, modern, legacy = dbus_mount_alternatives(ctx)
     var_run = os.path.join(ctx.fs_dir, "var", "run")
     if os.path.islink(var_run):
         expected = os.path.realpath(os.path.join(ctx.fs_dir, "run"))
@@ -469,25 +465,43 @@ def dbus_mount_requests(ctx):
             raise MountEvidenceError(
                 f"FileSystem var/run link escapes run: {var_run}"
             )
-        second = MountRequest(
-            source="/run/dbus",
-            destination=os.path.join(ctx.fs_dir, "run", "dbus"),
-            label="/run/dbus",
-            options=("--bind",),
-        )
+        second = modern
     else:
-        second = MountRequest(
-            source="/var/run/dbus",
-            destination=os.path.join(
-                ctx.fs_dir,
-                "var",
-                "run",
-                "dbus",
-            ),
-            label="/var/run/dbus",
-            options=("--bind",),
-        )
+        second = legacy
     return first, second
+
+
+def dbus_mount_alternatives(ctx):
+    """Return immutable authorized D-Bus plans for journal validation."""
+    first = MountRequest(
+        source="/var/lib/dbus",
+        destination=os.path.join(ctx.fs_dir, "var", "lib", "dbus"),
+        label="/var/lib/dbus",
+        options=("--bind",),
+    )
+    modern = MountRequest(
+        source="/run/dbus",
+        destination=os.path.join(ctx.fs_dir, "run", "dbus"),
+        label="/run/dbus",
+        options=("--bind",),
+    )
+    legacy = MountRequest(
+        source="/var/run/dbus",
+        destination=os.path.join(
+            ctx.fs_dir,
+            "var",
+            "run",
+            "dbus",
+        ),
+        label="/var/run/dbus",
+        options=("--bind",),
+    )
+    return first, modern, legacy
+
+
+def authorized_mount_requests(ctx):
+    """Return mount plans independent of mutable FileSystem topology."""
+    return system_mount_requests(ctx) + dbus_mount_alternatives(ctx)
 
 
 def run_mount(request, runner=None):
@@ -578,6 +592,176 @@ def attributable_mounts(request, before, after):
     return tuple(relevant)
 
 
+def _covering_mount(identities, path):
+    candidates = tuple(
+        identity
+        for identity in identities
+        if _path_within(
+            identity.mount_point,
+            path,
+            include_root=True,
+        )
+    )
+    if not candidates:
+        raise MountEvidenceError(
+            f"No mount identity covers source path: {path}"
+        )
+    longest = max(
+        len(identity.mount_point.rstrip(os.sep))
+        for identity in candidates
+    )
+    nearest = tuple(
+        identity
+        for identity in candidates
+        if len(identity.mount_point.rstrip(os.sep)) == longest
+    )
+    if len(nearest) != 1:
+        raise MountEvidenceError(
+            f"Source mount topology is stacked or ambiguous: {path}"
+        )
+    return nearest[0]
+
+
+def _expected_bind_root(source_mount, source_path):
+    relative = os.path.relpath(
+        source_path,
+        source_mount.mount_point,
+    )
+    if relative == ".":
+        return source_mount.root
+    return posixpath.normpath(
+        posixpath.join(
+            source_mount.root,
+            relative.replace(os.sep, "/"),
+        )
+    )
+
+
+def _same_mounted_object(actual, source, expected_root=None):
+    root = source.root if expected_root is None else expected_root
+    return (
+        actual.major_minor == source.major_minor
+        and actual.fs_type == source.fs_type
+        and actual.source == source.source
+        and actual.root == root
+    )
+
+
+def prove_preexisting_mount(request, identities):
+    """Return exact equivalent destination identities or fail closed."""
+    source_path = os.path.abspath(request.source)
+    destination = os.path.abspath(request.destination)
+    source_root = _covering_mount(identities, source_path)
+    destination_identities = mounts_under(
+        identities,
+        destination,
+        include_root=True,
+    )
+    destination_roots = mounts_at(
+        destination_identities,
+        destination,
+    )
+    if len(destination_roots) != 1:
+        raise MountEvidenceError(
+            "Pre-existing destination mount is absent, stacked, or ambiguous"
+        )
+    destination_root = destination_roots[0]
+    if not _same_mounted_object(
+        destination_root,
+        source_root,
+        expected_root=_expected_bind_root(
+            source_root,
+            source_path,
+        ),
+    ):
+        raise MountEvidenceError(
+            "Pre-existing destination mount does not match its source"
+        )
+    if not request.recursive:
+        if len(destination_identities) != 1:
+            raise MountEvidenceError(
+                "Pre-existing non-recursive mount has unproved topology"
+            )
+        return (destination_root,)
+
+    source_nested = mounts_under(
+        identities,
+        source_path,
+        include_root=False,
+    )
+    source_by_path = {}
+    for identity in source_nested:
+        source_by_path.setdefault(identity.mount_point, []).append(identity)
+    if any(len(group) != 1 for group in source_by_path.values()):
+        raise MountEvidenceError(
+            "Recursive source topology is stacked or ambiguous"
+        )
+
+    expected_destinations = {destination: destination_root}
+    source_to_destination_id = {
+        source_root.mount_id: destination_root.mount_id,
+    }
+    ordered_nested = sorted(
+        source_nested,
+        key=lambda identity: (
+            identity.mount_point.count(os.sep),
+            identity.mount_id,
+        ),
+    )
+    for source_identity in ordered_nested:
+        relative = os.path.relpath(
+            source_identity.mount_point,
+            source_path,
+        )
+        expected_path = os.path.normpath(
+            os.path.join(destination, relative)
+        )
+        matches = mounts_at(
+            destination_identities,
+            expected_path,
+        )
+        if len(matches) != 1:
+            raise MountEvidenceError(
+                "Recursive destination topology is incomplete or stacked"
+            )
+        actual = matches[0]
+        if not _same_mounted_object(actual, source_identity):
+            raise MountEvidenceError(
+                "Recursive destination mount does not match its source"
+            )
+        expected_parent = source_to_destination_id.get(
+            source_identity.parent_id
+        )
+        if (
+            expected_parent is not None
+            and actual.parent_id != expected_parent
+        ):
+            raise MountEvidenceError(
+                "Recursive destination ancestry is not equivalent"
+            )
+        expected_destinations[expected_path] = actual
+        source_to_destination_id[
+            source_identity.mount_id
+        ] = actual.mount_id
+    if set(expected_destinations) != {
+        identity.mount_point
+        for identity in destination_identities
+    }:
+        raise MountEvidenceError(
+            "Recursive destination contains unproved mount identities"
+        )
+    return tuple(
+        expected_destinations[path]
+        for path in sorted(
+            expected_destinations,
+            key=lambda item: (
+                item.count(os.sep),
+                item,
+            ),
+        )
+    )
+
+
 def parse_xhost_output(text):
     if not isinstance(text, str):
         raise XAccessEvidenceError("X access output is invalid")
@@ -612,11 +796,15 @@ def parse_xhost_output(text):
 
 
 def _default_x_runner(command):
+    environment = os.environ.copy()
+    environment["LANG"] = "C"
+    environment["LC_ALL"] = "C"
     return subprocess.run(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=environment,
     )
 
 

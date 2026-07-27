@@ -17,7 +17,11 @@ from liveusb.backend import hook
 from liveusb.backend import pkgm
 from liveusb.backend import rebuild
 from liveusb.backend import xnest
-from liveusb.backend.mount_session import MountSession
+from liveusb.backend.mount_session import (
+    MountCleanupFailure,
+    MountSession,
+    MountSessionCleanupError,
+)
 
 from tests.test_mount_session import FakeMountTable
 from tests.test_mount_session import FakeXAccess
@@ -65,6 +69,27 @@ class _RecordingSession:
             )
         )
         return f"/tmp/staged-{purpose}{suffix}"
+
+
+class _CleanupFailingSession(_RecordingSession):
+    def __exit__(self, exception_type, error, _traceback):
+        if exception_type is None:
+            exception_name = None
+        else:
+            exception_name = exception_type.__name__
+        self.events.append(("exit", exception_name))
+        cleanup_error = MountSessionCleanupError(
+            (
+                MountCleanupFailure(
+                    "synthetic_session_cleanup",
+                    "/synthetic",
+                    OSError("synthetic session cleanup failure"),
+                ),
+            )
+        )
+        if error is not None:
+            raise cleanup_error from error
+        raise cleanup_error
 
 
 class _RecordingProcess:
@@ -181,6 +206,42 @@ class MountCallerTests(unittest.TestCase):
             )
             yield chroot_run, session_factory
 
+    @contextlib.contextmanager
+    def _simulated_chroot_success(self, module, events):
+        session = _RecordingSession(events)
+
+        def record_command(_ctx, *command):
+            events.append(("chroot_run", command))
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(module.mounts, "check_fs_dir")
+            )
+            stack.enter_context(
+                mock.patch.object(module.mounts, "check_lock")
+            )
+            stack.enter_context(
+                mock.patch.object(module.chroot, "update_distro_name")
+            )
+            stack.enter_context(
+                mock.patch.object(module.chroot, "check_sources_list")
+            )
+            chroot_run = stack.enter_context(
+                mock.patch.object(
+                    module.chroot,
+                    "chroot_run",
+                    side_effect=record_command,
+                )
+            )
+            session_factory = stack.enter_context(
+                mock.patch.object(
+                    module.mount_session,
+                    "MountSession",
+                    return_value=session,
+                )
+            )
+            yield chroot_run, session_factory
+
     def test_chroot_shell_releases_session_after_command_failure(self):
         events = []
 
@@ -230,6 +291,44 @@ class MountCallerTests(unittest.TestCase):
                 "allow_x",
                 "mount_sys",
                 ("exit", "RuntimeError"),
+            ],
+        )
+        session_factory.assert_called_once_with(self.context)
+
+    def test_deb_success_preserves_complete_command_order(self):
+        package = Path(self.temporary_directory.name) / "sample.deb"
+        package.write_bytes(b"synthetic package")
+        self.context.deb = str(package)
+        events = []
+
+        with self._simulated_chroot_success(
+            deb,
+            events,
+        ) as (_chroot_run, session_factory):
+            deb.run_deb(self.context)
+
+        self.assertEqual(
+            events,
+            [
+                "enter",
+                (
+                    "stage_file",
+                    str(package),
+                    "deb",
+                    ".deb",
+                    False,
+                ),
+                "allow_x",
+                "mount_sys",
+                (
+                    "chroot_run",
+                    ("dpkg", "-i", "/tmp/staged-deb.deb"),
+                ),
+                (
+                    "chroot_run",
+                    ("apt-get", "install", "-f", "-y"),
+                ),
+                ("exit", None),
             ],
         )
         session_factory.assert_called_once_with(self.context)
@@ -465,6 +564,121 @@ class MountCallerTests(unittest.TestCase):
         self.assertIs(
             captured.exception.failures[0].error,
             stop_failure,
+        )
+
+    def test_xnest_success_preserves_process_and_session_order(self):
+        session_directory = (
+            self.work_dir / "FileSystem/usr/share/xsessions"
+        )
+        session_directory.mkdir(parents=True)
+        (session_directory / "ubuntu.desktop").write_text(
+            "[Desktop Entry]\nExec=test-session\n",
+            encoding="utf-8",
+        )
+        (self.work_dir / "FileSystem/etc/casper.conf").write_text(
+            'export USERNAME="ubuntu"\n',
+            encoding="utf-8",
+        )
+        events = []
+        process = _RecordingProcess(events)
+
+        def launch_process(*_args, **_kwargs):
+            events.append("popen")
+            return process
+
+        with self._simulated_chroot_success(
+            xnest,
+            events,
+        ) as (_chroot_run, session_factory), mock.patch.object(
+            xnest.subprocess,
+            "Popen",
+            side_effect=launch_process,
+        ), mock.patch.object(
+            xnest.time,
+            "sleep",
+        ):
+            xnest.run_xnest(self.context)
+
+        self.assertEqual(
+            events,
+            [
+                "enter",
+                "popen",
+                "allow_x",
+                "mount_sys",
+                "mount_dbus",
+                (
+                    "chroot_run",
+                    ("apt-get", "install", "dbus", "-y", "-f"),
+                ),
+                (
+                    "chroot_run",
+                    ("dbus-uuidgen", "--ensure"),
+                ),
+                (
+                    "chroot_run",
+                    (
+                        "env",
+                        "DISPLAY=localhost:9",
+                        "test-session",
+                    ),
+                ),
+                "terminate",
+                ("wait", 5),
+                ("exit", None),
+            ],
+        )
+        session_factory.assert_called_once_with(self.context)
+
+    def test_operation_xephyr_and_session_cleanup_failures_chain(self):
+        session_directory = (
+            self.work_dir / "FileSystem/usr/share/xsessions"
+        )
+        session_directory.mkdir(parents=True)
+        (session_directory / "ubuntu.desktop").write_text(
+            "[Desktop Entry]\nExec=test-session\n",
+            encoding="utf-8",
+        )
+        events = []
+        failing_session = _CleanupFailingSession(events)
+        process = _ScriptedProcess(
+            terminate_error=OSError(
+                "synthetic Xephyr cleanup failure"
+            ),
+            wait_results=(0,),
+        )
+
+        with self._simulated_chroot_failure(
+            xnest,
+            events,
+        ), mock.patch.object(
+            xnest.mount_session,
+            "MountSession",
+            return_value=failing_session,
+        ), mock.patch.object(
+            xnest.subprocess,
+            "Popen",
+            return_value=process,
+        ), mock.patch.object(
+            xnest.time,
+            "sleep",
+        ):
+            with self.assertRaises(
+                MountSessionCleanupError
+            ) as captured:
+                xnest.run_xnest(self.context)
+
+        self.assertIsInstance(
+            captured.exception.__cause__,
+            xnest.XephyrCleanupError,
+        )
+        self.assertIsInstance(
+            captured.exception.__cause__.__cause__,
+            RuntimeError,
+        )
+        self.assertEqual(
+            events[-1],
+            ("exit", "XephyrCleanupError"),
         )
 
     def test_all_seven_callers_use_the_session_boundary(self):

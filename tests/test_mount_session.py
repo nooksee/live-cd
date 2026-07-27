@@ -23,16 +23,19 @@ def mount_identity(
     path,
     parent_id=1,
     source="/synthetic",
+    major_minor="0:1",
+    root="/",
+    fs_type="none",
 ):
     return mounts.MountIdentity(
         mount_id=mount_id,
         parent_id=parent_id,
-        major_minor="0:1",
-        root="/",
+        major_minor=major_minor,
+        root=root,
         mount_point=os.path.abspath(path),
         mount_options=("rw",),
         optional_fields=(),
-        fs_type="none",
+        fs_type=fs_type,
         source=source,
         super_options=("rw",),
     )
@@ -52,12 +55,23 @@ class FakeMountTable:
     def reader(self):
         return tuple(self.identities)
 
-    def add(self, path, parent_id=1, source="/synthetic"):
+    def add(
+        self,
+        path,
+        parent_id=1,
+        source="/synthetic",
+        major_minor="0:1",
+        root="/",
+        fs_type="none",
+    ):
         identity = mount_identity(
             self.next_id,
             path,
             parent_id=parent_id,
             source=source,
+            major_minor=major_minor,
+            root=root,
+            fs_type=fs_type,
         )
         self.next_id += 1
         self.identities.append(identity)
@@ -176,6 +190,22 @@ class MountEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(identities[0].source, "/source name")
 
+    def test_mountinfo_decodes_tab_newline_and_backslash(self):
+        identities = mounts.parse_mountinfo(
+            "21 1 0:3 / "
+            "/work/FileSystem/tab\\011line\\012slash\\134name "
+            "rw - none /source\\011value rw\n"
+        )
+
+        self.assertEqual(
+            identities[0].mount_point,
+            "/work/FileSystem/tab\tline\nslash\\name",
+        )
+        self.assertEqual(
+            identities[0].source,
+            "/source\tvalue",
+        )
+
     def test_stacked_mounts_remain_distinct_identities(self):
         identities = mounts.parse_mountinfo(
             "30 1 0:4 / /work/FileSystem/dev rw - none /one rw\n"
@@ -225,6 +255,19 @@ class MountEvidenceTests(unittest.TestCase):
             ),
         )
 
+    def test_xhost_runner_forces_deterministic_c_locale(self):
+        completed = mock.Mock(returncode=0, stdout="")
+        with mock.patch.object(
+            mounts.subprocess,
+            "run",
+            return_value=completed,
+        ) as run_command:
+            mounts._default_x_runner(["xhost"])
+
+        environment = run_command.call_args.kwargs["env"]
+        self.assertEqual(environment["LANG"], "C")
+        self.assertEqual(environment["LC_ALL"], "C")
+
 
 class MountSessionTests(unittest.TestCase):
     def setUp(self):
@@ -272,7 +315,14 @@ class MountSessionTests(unittest.TestCase):
         self.assertEqual(pending, ())
 
     def test_preexisting_mount_is_not_owned_or_unmounted(self):
-        existing = self.table.add(self.fs_dir / "dev", source="/dev")
+        source = self.table.add(
+            "/dev",
+            source="/dev-device",
+        )
+        existing = self.table.add(
+            self.fs_dir / "dev",
+            source="/dev-device",
+        )
 
         with self.session() as session:
             acquisitions = session.mount_sys()
@@ -283,10 +333,60 @@ class MountSessionTests(unittest.TestCase):
         )
         self.assertEqual(acquisitions[0].owned, ())
         self.assertIn(existing, self.table.identities)
+        self.assertIn(source, self.table.identities)
         self.assertNotIn(
             str(self.fs_dir / "dev"),
             tuple(command[-1] for command in self.table.unmount_commands),
         )
+        self.assert_runtime_clean()
+
+    def test_wrong_preexisting_mount_fails_before_mount_command(self):
+        self.table.add("/dev", source="/dev-device")
+        wrong = self.table.add(
+            self.fs_dir / "dev",
+            source="/wrong-device",
+        )
+
+        with self.assertRaises(MountAcquisitionError):
+            with self.session() as session:
+                session.mount_sys()
+
+        self.assertEqual(self.table.mount_commands, [])
+        self.assertIn(wrong, self.table.identities)
+        self.assert_runtime_clean()
+
+    def test_unproved_preexisting_mount_fails_before_mount_command(self):
+        unproved = self.table.add(
+            self.fs_dir / "dev",
+            source="/dev-device",
+        )
+
+        with self.assertRaises(MountAcquisitionError):
+            with self.session() as session:
+                session.mount_sys()
+
+        self.assertEqual(self.table.mount_commands, [])
+        self.assertIn(unproved, self.table.identities)
+        self.assert_runtime_clean()
+
+    def test_stacked_preexisting_mount_fails_before_mount_command(self):
+        self.table.add("/dev", source="/dev-device")
+        first = self.table.add(
+            self.fs_dir / "dev",
+            source="/dev-device",
+        )
+        second = self.table.add(
+            self.fs_dir / "dev",
+            source="/dev-device",
+        )
+
+        with self.assertRaises(MountAcquisitionError):
+            with self.session() as session:
+                session.mount_sys()
+
+        self.assertEqual(self.table.mount_commands, [])
+        self.assertIn(first, self.table.identities)
+        self.assertIn(second, self.table.identities)
         self.assert_runtime_clean()
 
     def test_owned_mounts_and_nested_rbind_cleanup_in_reverse_order(self):
@@ -389,6 +489,26 @@ class MountSessionTests(unittest.TestCase):
         self.assertFalse(external_path.exists())
         self.assert_runtime_clean()
 
+    def test_failed_mount_with_preexisting_directory_keeps_journal(self):
+        destination = self.fs_dir / "dev"
+        destination.mkdir()
+        self.table.fail_next_mount = True
+        session = self.session()
+
+        with self.assertRaises(MountSessionCleanupError):
+            with session:
+                session.mount_sys()
+
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assertTrue(destination.is_dir())
+        self.assertTrue(os.path.lexists(session.journal_path))
+
+        self.table.remove_path(destination)
+        session.cleanup()
+
+        self.assertTrue(destination.is_dir())
+        self.assert_runtime_clean()
+
     def test_ambiguous_concurrent_acquisition_is_preserved(self):
         self.table.ambiguous_next_mount = True
         session = self.session()
@@ -412,6 +532,10 @@ class MountSessionTests(unittest.TestCase):
             2,
         )
         self.assertTrue(os.path.lexists(session.journal_path))
+        self.table.remove_path(self.fs_dir / "dev")
+        session.cleanup()
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assert_runtime_clean()
 
     def test_replacement_mount_fails_before_any_cleanup_mutation(self):
         session = self.session()
@@ -605,6 +729,34 @@ class MountSessionTests(unittest.TestCase):
         self.assertEqual(tuple(removed), expected)
         self.assert_runtime_clean()
 
+    def test_mounted_created_directory_identity_is_deferred(self):
+        destination = self.fs_dir / "dev"
+        real_matcher = mounts.directory_identity_matches
+
+        with self.session() as session:
+            session.mount_sys()
+
+            def mounted_view(path, expected):
+                if (
+                    os.path.abspath(path) == str(destination)
+                    and mounts.mounts_at(
+                        self.table.reader(),
+                        destination,
+                    )
+                ):
+                    return False
+                return real_matcher(path, expected)
+
+            with mock.patch.object(
+                mounts,
+                "directory_identity_matches",
+                side_effect=mounted_view,
+            ):
+                session.cleanup()
+
+        self.assertFalse(destination.exists())
+        self.assert_runtime_clean()
+
     def test_staging_uses_unique_paths_and_preserves_legacy_names(self):
         legacy_deb = self.fs_dir / "tmp/temp.deb"
         legacy_hook = self.fs_dir / "tmp/HOOK"
@@ -656,6 +808,61 @@ class MountSessionTests(unittest.TestCase):
         )
         self.assert_runtime_clean()
 
+    def test_writing_artifact_uses_recorded_inode_for_cleanup(self):
+        payload = b"partial-copy-payload"
+        source = self.root / "source.deb"
+        source.write_bytes(payload)
+        session = self.session()
+        real_write_all = session._write_all
+
+        def fail_payload_write(descriptor, raw):
+            if raw == payload:
+                os.write(descriptor, raw[:7])
+                raise OSError("synthetic staging write failure")
+            return real_write_all(descriptor, raw)
+
+        with self.assertRaisesRegex(
+            OSError,
+            "synthetic staging write failure",
+        ):
+            with session:
+                with mock.patch.object(
+                    session,
+                    "_write_all",
+                    side_effect=fail_payload_write,
+                ):
+                    session.stage_file(
+                        str(source),
+                        "deb",
+                        suffix=".deb",
+                    )
+
+        self.assertEqual(
+            tuple((self.fs_dir / "tmp").glob("liveusb-*")),
+            (),
+        )
+        self.assert_runtime_clean()
+
+    def test_active_artifact_disappearance_fails_closed(self):
+        source = self.root / "source.deb"
+        source.write_bytes(b"active artifact")
+        session = self.session()
+        session.__enter__()
+        session.stage_file(
+            str(source),
+            "deb",
+            suffix=".deb",
+        )
+        artifact = tuple(
+            (self.fs_dir / "tmp").glob("liveusb-*")
+        )[0]
+        os.unlink(artifact)
+
+        with self.assertRaises(MountSessionCleanupError):
+            session.__exit__(None, None, None)
+
+        self.assertTrue(os.path.lexists(session.journal_path))
+
     def test_staging_cleans_when_later_mount_acquisition_fails(self):
         source = self.root / "source.deb"
         source.write_bytes(b"payload")
@@ -672,11 +879,16 @@ class MountSessionTests(unittest.TestCase):
                 session.mount_sys()
 
         self.assertEqual(
+            len(tuple((self.fs_dir / "tmp").glob("liveusb-*"))),
+            1,
+        )
+        self.assertTrue(os.path.lexists(session.journal_path))
+        self.table.remove_path(self.fs_dir / "dev")
+        session.cleanup()
+        self.assertEqual(
             tuple((self.fs_dir / "tmp").glob("liveusb-*")),
             (),
         )
-        self.table.remove_path(self.fs_dir / "dev")
-        session.cleanup()
         self.assert_runtime_clean()
 
     def test_same_object_cleanup_retry_removes_staged_artifact(self):

@@ -1,6 +1,7 @@
 """Port of .hidden/scripts/rebuild: assemble the final bootable ISO image."""
 
 import glob
+import hashlib
 import os
 import shutil
 import subprocess
@@ -11,6 +12,7 @@ from .. import constants, messages
 
 _EFI_KERNEL_REFERENCE = b"vmlinuz.efi"
 _MEDIA_SCAN_CHUNK_SIZE = 64 * 1024
+_SHA256_CHUNK_SIZE = 1024 * 1024
 
 
 def _grep_value(path, key):
@@ -46,6 +48,189 @@ def _media_references_vmlinuz_efi(root):
         except OSError:
             continue
     return False
+
+
+def _compression_is_supported(compression, probe=None):
+    """Determine compressor support without creating an image."""
+    if not isinstance(compression, str) or not compression:
+        return False
+    selected_probe = subprocess.run if probe is None else probe
+    try:
+        result = selected_probe(
+            ["mksquashfs", "-help-comp", compression],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as error:
+        raise messages.LiveUSBError(
+            "Unable to inspect mksquashfs compression capability"
+        ) from error
+    return getattr(result, "returncode", 1) == 0
+
+
+def _plan_mksquashfs_command(ctx, output_path, probe=None):
+    command = [
+        "mksquashfs",
+        ctx.fs_dir,
+        output_path,
+        "-wildcards",
+        "-ef",
+        constants.EXCLUDE_FILE,
+    ]
+    if _compression_is_supported(ctx.compression, probe=probe):
+        command.extend(("-comp", ctx.compression))
+    else:
+        messages.warning(
+            "Configured SquashFS compression is unsupported; "
+            "the tool default will be used"
+        )
+    return command
+
+
+def _build_squashfs(ctx, output_path, probe=None, runner=None):
+    command = _plan_mksquashfs_command(
+        ctx,
+        output_path,
+        probe=probe,
+    )
+    selected_runner = run if runner is None else runner
+    try:
+        result = selected_runner(command)
+    except Exception as error:
+        raise messages.LiveUSBError(
+            "Unable to execute mksquashfs"
+        ) from error
+    if getattr(result, "returncode", 1) != 0:
+        raise messages.LiveUSBError(
+            "Unable to squash the FileSystem"
+        )
+    return command
+
+
+def _legacy_media_profile(ctx):
+    return all((
+        os.path.isdir(os.path.join(ctx.iso_dir, "isolinux")),
+        os.path.isfile(
+            os.path.join(ctx.iso_dir, "isolinux", "isolinux.bin")
+        ),
+        os.path.isdir(os.path.join(ctx.iso_dir, "casper")),
+        os.path.isdir(os.path.join(ctx.iso_dir, ".disk")),
+    ))
+
+
+def _remove_stale_outputs(paths):
+    for path in paths:
+        if not os.path.lexists(path):
+            continue
+        messages.extra_info("Purging", path)
+        try:
+            os.remove(path)
+        except OSError as error:
+            raise messages.LiveUSBError(
+                f"Unable to delete stale rebuild output: {path}"
+            ) from error
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(
+                lambda: handle.read(_SHA256_CHUNK_SIZE),
+                b"",
+            ):
+                digest.update(chunk)
+    except OSError as error:
+        raise messages.LiveUSBError(
+            f"Unable to hash final image: {path}"
+        ) from error
+    return digest.hexdigest()
+
+
+def _sha256_temporary_path(sidecar_path):
+    return sidecar_path + ".tmp"
+
+
+def _close_quietly(descriptor):
+    if descriptor is None:
+        return
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
+
+
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _publish_sha256(iso_path, sidecar_path):
+    """Publish one complete sidecar through an atomic replacement."""
+    digest = _sha256_file(iso_path)
+    temporary_path = _sha256_temporary_path(sidecar_path)
+    descriptor = None
+    try:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(temporary_path, flags, 0o644)
+        payload = f"{digest}  {iso_path}\n".encode("utf-8")
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("short SHA-256 sidecar write")
+            offset += written
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary_path, sidecar_path)
+        directory_descriptor = os.open(
+            os.path.dirname(sidecar_path),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except Exception as error:
+        _close_quietly(descriptor)
+        _remove_quietly(temporary_path)
+        _remove_quietly(sidecar_path)
+        raise messages.LiveUSBError(
+            "Unable to publish final ISO SHA-256 evidence"
+        ) from error
+    return digest
+
+
+def _finalize_legacy_iso(ctx, iso_path, sidecar_path, runner=None):
+    if not _legacy_media_profile(ctx):
+        raise messages.LiveUSBError(
+            "ISO finalization requires the accepted legacy-media profile"
+        )
+    selected_runner = run if runner is None else runner
+    try:
+        result = selected_runner(["isohybrid", iso_path])
+    except Exception as error:
+        raise messages.LiveUSBError(
+            "Unable to apply legacy hybrid ISO mutation"
+        ) from error
+    if getattr(result, "returncode", 1) != 0:
+        raise messages.LiveUSBError(
+            "Unable to apply legacy hybrid ISO mutation"
+        )
+    try:
+        os.chmod(iso_path, 0o555)
+    except Exception as error:
+        raise messages.LiveUSBError(
+            "Unable to seal the finalized ISO read-only"
+        ) from error
+    return _publish_sha256(iso_path, sidecar_path)
 
 
 def run_rebuild(ctx):
@@ -125,8 +310,16 @@ def run_rebuild(ctx):
         messages.error("Unable to get the distribution version")
 
     iso_path = os.path.join(ctx.work_dir, f"{dist}-{arch}-{version}.iso")
-    to_clean = [
+    sha256_path = os.path.join(
+        ctx.work_dir,
+        f"{dist}-{arch}-{version}.sha256",
+    )
+    _remove_stale_outputs((
         iso_path,
+        sha256_path,
+        _sha256_temporary_path(sha256_path),
+    ))
+    to_clean = [
         os.path.join(casper_dir, "filesystem.squashfs"),
         os.path.join(casper_dir, "initrd.lz"),
         os.path.join(casper_dir, "vmlinuz"),
@@ -219,13 +412,7 @@ def run_rebuild(ctx):
 
     messages.info("Creating squashed FileSystem")
     squashfs_path = os.path.join(casper_dir, "filesystem.squashfs")
-    cmd = ["mksquashfs", ctx.fs_dir, squashfs_path, "-wildcards", "-ef", constants.EXCLUDE_FILE]
-    result = run(cmd + ["-comp", ctx.compression])
-    if result.returncode != 0:
-        messages.warning("Old mksquashfs version detected, compress option omitted!")
-        result = run(cmd)
-    if result.returncode != 0:
-        messages.error("Unable to squash the FileSystem!")
+    _build_squashfs(ctx, squashfs_path)
 
     messages.info("Checking FileSystem size")
     fs_size = os.path.getsize(squashfs_path)
@@ -281,26 +468,31 @@ def run_rebuild(ctx):
     _write_md5sums(ctx.iso_dir, md5sum_path)
 
     messages.info("Creating image file")
-    genisoimage_result = run([
-        "genisoimage",
-        "-r",
-        "-V", f"{dist}-{arch}-{version}",
-        "-b", "isolinux/isolinux.bin",
-        "-c", "isolinux/boot.cat",
-        "-cache-inodes",
-        "-J",
-        "-l",
-        "-no-emul-boot",
-        "-boot-load-size", "4",
-        "-boot-info-table",
-        "-o", iso_path,
-        "-input-charset", "utf-8",
-        ".",
-    ], cwd=ctx.iso_dir)
-    if genisoimage_result.returncode != 0:
-        messages.error("Unable to create image file!")
+    try:
+        genisoimage_result = run([
+            "genisoimage",
+            "-r",
+            "-V", f"{dist}-{arch}-{version}",
+            "-b", "isolinux/isolinux.bin",
+            "-c", "isolinux/boot.cat",
+            "-cache-inodes",
+            "-J",
+            "-l",
+            "-no-emul-boot",
+            "-boot-load-size", "4",
+            "-boot-info-table",
+            "-o", iso_path,
+            "-input-charset", "utf-8",
+            ".",
+        ], cwd=ctx.iso_dir)
+    except Exception as error:
+        raise messages.LiveUSBError(
+            "Unable to execute genisoimage"
+        ) from error
+    if getattr(genisoimage_result, "returncode", 1) != 0:
+        raise messages.LiveUSBError("Unable to create image file")
 
-    os.chmod(iso_path, 0o555)
+    _finalize_legacy_iso(ctx, iso_path, sha256_path)
     messages.info("Distribution rebuild completed. Use 'exit' to quit properly.")
     if shutil.which("zenity"):
         subprocess.run([

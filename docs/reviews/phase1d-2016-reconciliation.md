@@ -1,8 +1,9 @@
 # Phase 1D: LiveCD Creator 3.13.93 reconciliation
 
 - Date: 2026-07-28
-- Status: accepted historical evidence and bounded execution authority
-- Product-code changes in this review: `0`
+- Status: accepted root-free implementation; real factory acceptance pending
+- Product-code paths changed by Phase 1D: `2`
+- Test paths changed by Phase 1D: `2`
 - Root, mount, chroot, package, ISO-build, QEMU, and GUI operations: `0`
 
 ## Authority
@@ -88,11 +89,11 @@ decompilation occurred during this review.
 
 | Recovered 2016 behavior | Current classification | Execution phase |
 | --- | --- | --- |
-| ISO mutation through `isohybrid` | Missing fidelity behavior for the legacy-media path | Phase 1D |
-| Final ISO SHA-256 sidecar | Missing fidelity and evidence behavior | Phase 1D |
-| Stale SHA-256 sidecar cleanup | Missing lifecycle behavior | Phase 1D |
-| `mksquashfs` 4.2/4.3 version test | Confirmed obsolete legacy mechanism | Phase 1D modernization |
-| Retry-without-compression after any squash failure | Confirmed unsafe Python divergence because it can repeat a full build for an unrelated failure | Phase 1D correction |
+| ISO mutation through `isohybrid` | Implemented and root-free accepted for the legacy-media profile | Phase 1D accepted |
+| Final ISO SHA-256 sidecar | Implemented with final-byte and basename validation | Phase 1D accepted |
+| Stale SHA-256 sidecar cleanup | Replaced by crash-durable prior-pair preservation and publication custody | Phase 1D accepted |
+| `mksquashfs` 4.2/4.3 version test | Replaced by a bounded synthetic capability probe | Phase 1D accepted |
+| Retry-without-compression after any squash failure | Removed; one product-tree SquashFS invocation is enforced | Phase 1D accepted |
 | Persistent `/var/log/live-cd.log` | Recovered behavior; host-global path is not accepted as the modern contract | Deferred logging design |
 | `ZENITY_ERROR` with a bare shell `exit` | Recovered behavior with ambiguous or successful exit status; not accepted | Deferred operator-error adapter |
 | Removal of `__check_sources_list__` | Current Python stub is dead and behaviorally inert | Deferred mechanical cleanup |
@@ -141,22 +142,57 @@ Package installation is not part of the root-free implementation lane.
 
 ## Phase 1D root-free acceptance
 
-The implementation lane must prove:
+Production commits:
 
-- stale ISO and SHA-256 outputs are included in bounded cleanup;
-- unsupported compression capability is decided before `mksquashfs` runs;
+- `2d34aea` — bounded compression planning, legacy finalization, and initial
+  characterization;
+- `e4746bc` — crash-durable final-image custody and narrow recovery;
+- `aa9e1f5` — default real-probe execution and hard-link rejection proof.
+
+The accepted implementation proves:
+
+- unsupported compression is decided by one bounded synthetic probe before
+  `mksquashfs` reads the product tree;
 - `mksquashfs` executes at most once per rebuild request;
-- `isohybrid` is invoked only for the accepted legacy-media profile;
-- `isohybrid` failure prevents read-only sealing, sidecar publication, and
+- `isohybrid` runs only for the literal, non-symlink legacy-media profile;
+- mutation failure prevents sealing, hashing, sidecar publication, and
   success reporting;
 - the ISO is sealed only after all content mutation completes;
-- the SHA-256 sidecar describes the final ISO bytes;
-- sidecar-write failure leaves no sidecar that can be mistaken for accepted
-  evidence;
-- every failure propagates through the current `LiveUSBError` boundary;
-- existing transaction and mount-session suites remain green;
-- real root, mount, chroot, package, ISO-build, QEMU, and GUI operations
-  remain `0`.
+- the SHA-256 sidecar records the final ISO bytes using the ISO basename;
+- one operation lock spans SquashFS creation through acknowledgement;
+- a previous valid ISO and sidecar remain recoverable across every
+  publication boundary;
+- post-seal recovery resumes hashing or publication without repeating kernel
+  work, SquashFS, `genisoimage`, or `isohybrid`;
+- altered, foreign, non-regular, hard-linked, path-escaping, corrupt, or
+  ownership-mismatched evidence fails closed;
+- failures propagate through the current `LiveUSBError` and cleanup-chaining
+  boundaries.
+
+Acceptance results:
+
+- focused finalization tests: `26/26`;
+- complete GUI-capable suite: `239/239`;
+- core-only suite: `238` pass and `1` expected GUI skip;
+- syntax and Python 3.8 grammar: `48/48`;
+- product and core-only imports: `37/37` and `23/23`;
+- process smokes: `4/4`;
+- default real compressor outcomes: `xz` accepted and invalid compression
+  rejected;
+- publication interruption boundaries recovered: `7/7`;
+- runtime, journal, pending-journal, candidate, backup, probe, and temporary
+  residue: `0`.
+
+Claude Devens independently reconciled oracle cases `16/16` and returned
+`ACCEPT`, with `0` blocking and `0` major findings. Two minor test-posture
+findings were closed before integration: the real capability probe now runs
+by default when `mksquashfs` is available, and a real hard-link case proves
+rejection before mutation.
+
+Real root, sudo, mount, unmount, chroot, package, product-ISO, QEMU, Xephyr,
+and GUI operations remained `0`. Native Python 3.8 execution, actual power
+loss, a complete product ISO build, and the privileged factory cycle remain
+untested.
 
 ## Real acceptance after Phase 1D
 
@@ -175,33 +211,32 @@ After root-free review and integration:
 The recovered customization actions remain real product work, but they do
 not move this first boot gate.
 
-## Next team lanes
+## Completed team lanes
 
-### Claude Devens
+- Claude Devens produced the independent adversarial oracle and final
+  read-only correction review.
+- Jacob Codex implemented the bounded lane, crash-durable correction, and
+  test-closure micro-lane in an isolated clone.
+- George Prime reproduced the compressor-probe defect, integrated only after
+  independent acceptance, and executed the production acceptance matrix.
 
-Perform a read-only adversarial oracle over the Phase 1D final-image contract.
-Challenge command ordering, capability detection, output custody, incomplete
-sidecar handling, failure precedence, media-profile boundaries, and
-interaction with the accepted transaction layers. Return a test matrix and
-any required contract corrections. Modify files `0`.
+## Next operation
 
-### Jacob Codex
-
-Implement Phase 1D in an isolated clone from the exact accepted base after
-normal custody checks. Restrict writes initially to `liveusb/backend/rebuild.py`
-and focused rebuild tests. Run no real privileged or image-building command.
-Create one local commit and push `0` branches until George Prime accepts the
-reviewed result.
-
-### George Prime
-
-Reconcile both returns, integrate only after acceptance, maintain Git and
-dependency custody, and own the later real-operation gate.
+The next bounded operation is dependency and factory preflight. It must
+report the missing `isohybrid` dependency, privilege posture, disk space,
+legacy-media layout, work-directory custody, and planned commands before any
+real extraction or rebuild begins. Package installation and the real
+factory cycle require a separately recorded operational gate.
 
 ## Review accounting
 
 - Original translator protocol deviations: `1`, limited to remote-tracking
   reference updates; working-tree impact `0`.
-- George Prime protocol deviations: `0`.
-- Product files modified by this review: `0`.
+- Jacob Codex protocol deviations: `0`.
+- Claude Devens protocol deviations: `0`.
+- George Prime protocol deviations: `1`, limited to shell-active backticks in
+  one documentation search pattern; file, data, test, and persistent impact
+  `0`.
+- Product paths modified by Phase 1D: `2`.
+- Test paths modified by Phase 1D: `2`.
 - Historical evidence files modified by this review: `0`.

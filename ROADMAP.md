@@ -101,19 +101,40 @@ Accepted recovered-reference baseline:
 - accepted review:
   `docs/reviews/phase1d-2016-reconciliation.md`.
 
-Work:
+Accepted Phase 1D root-free baseline:
 
-1. Complete Phase 1D root-free characterization and correction of the legacy
-   final-image path: one preplanned SquashFS command, final `isohybrid`
-   mutation, read-only sealing, and final-byte SHA-256 evidence.
-2. Add dependency, privilege, disk-space, media-layout, and workspace
+- implementation commits: `2d34aea`, `e4746bc`, and `aa9e1f5`;
+- independent oracle cases: `16/16`;
+- blocking and major review findings: `0/0`;
+- minor review findings closed before integration: `2/2`;
+- focused finalization tests: `26/26`;
+- complete GUI-capable suite: `239/239`;
+- core-only suite: `238` pass and `1` expected GUI skip;
+- syntax and Python 3.8 grammar: `48/48`;
+- product and core-only imports: `37/37` and `23/23`;
+- real bounded compressor outcomes: `xz` accepted and invalid compression
+  rejected;
+- real privileged and product-image operation categories exercised: `0`.
+
+Completed root-free work:
+
+- one preplanned SquashFS command selected by a bounded capability probe;
+- explicit legacy-media profile recognition;
+- final `isohybrid` mutation before read-only sealing;
+- final-byte SHA-256 evidence;
+- crash-durable pair publication and narrow post-seal recovery;
+- one operation lock across generation, mutation, evidence, and publication.
+
+Remaining work:
+
+1. Add dependency, privilege, disk-space, media-layout, and workspace
    preflight reporting for the accepted legacy-media profile.
-3. Install or otherwise provide the missing `isohybrid` dependency only
+2. Install or otherwise provide the missing `isohybrid` dependency only
    after root-free implementation and review acceptance.
-4. Execute the legacy extract and no-change rebuild in a bounded workspace.
-5. Validate ISO structure, preserve the input byte-identically, and boot the
+3. Execute the legacy extract and no-change rebuild in a bounded workspace.
+4. Validate ISO structure, preserve the input byte-identically, and boot the
    output in QEMU.
-6. Reconcile the recovered 2016 customization actions after the first
+5. Reconcile the recovered 2016 customization actions after the first
    successful factory cycle. Device-writer launchers remain last.
 
 Acceptance:

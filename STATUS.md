@@ -21,12 +21,12 @@ extract → no-change rebuild → QEMU boot cycle promotes the project to
 ## Verified baseline
 
 - All Python files, including package initializers, passing syntax and
-  Python 3.8 grammar validation: `47/47`.
+  Python 3.8 grammar validation: `48/48`.
 - Importable product modules: `37/37`.
 - Harmless CLI process smokes returning expected statuses: `4/4`.
-- Current tracked test modules: `9`.
-- Current unit tests passing with GUI support installed: `213/213`.
-- Core-only unit tests passing without optional PyGObject: `212`, with the one
+- Current tracked test modules: `10`.
+- Current unit tests passing with GUI support installed: `239/239`.
+- Core-only unit tests passing without optional PyGObject: `238`, with the one
   GUI-specific assertion skipped.
 - Successful remaster cycles produced by the Python implementation: `0`.
 - Successful QEMU boots of Python-generated media: `0`.
@@ -137,8 +137,9 @@ Validation passes:
 
 An independent 2015-to-2016 comparison reproduces `13` changed overlapping
 files, `2` byte-identical files, and `5` added action files. The recovered
-build also adds final `isohybrid` mutation and an ISO SHA-256 sidecar. Those
-two final-image behaviors are missing from the current Python rebuild path.
+build also adds final `isohybrid` mutation and an ISO SHA-256 sidecar. Phase
+1D now implements and accepts those two behaviors for the bounded legacy-media
+profile while preserving the current Python safety authority.
 
 The accepted authority model is:
 
@@ -182,22 +183,60 @@ checkout and returned `ACCEPT`, with `0` blocking, `0` major, `0` minor, and
 design and evidence. Real privileged acceptance remains pending. The detailed
 record is `docs/reviews/phase1c2-mount-session-acceptance.md`.
 
+## Phase 1D root-free acceptance
+
+Production commits `2d34aea`, `e4746bc`, and `aa9e1f5` implement and prove
+the recovered legacy final-image contract:
+
+- one bounded synthetic SquashFS capability probe before one product-tree
+  SquashFS build;
+- explicit, literal, non-symlink legacy-media profile recognition;
+- `isohybrid` mutation before read-only sealing;
+- final-byte SHA-256 evidence using the ISO basename;
+- one operation lock spanning SquashFS generation through publication;
+- crash-durable candidate, prior-pair, backup, and publication custody;
+- narrow recovery after sealing without repeating kernel work, SquashFS,
+  `genisoimage`, or `isohybrid`;
+- fail-closed handling for altered, foreign, non-regular, hard-linked,
+  path-escaping, or ownership-mismatched evidence.
+
+Claude Devens independently traced oracle cases `16/16` and returned
+`ACCEPT`, with `0` blocking and `0` major findings. Two minor test-posture
+findings were closed before integration: the real compressor probe now runs
+by default when `mksquashfs` is available, and a real hard-link rejection
+case is included.
+
+Production acceptance passes:
+
+- focused finalization tests: `26/26`;
+- complete GUI-capable suite: `239/239`;
+- core-only suite: `238` pass and `1` expected GUI skip;
+- syntax and Python 3.8 grammar: `48/48`;
+- product and core-only imports: `37/37` and `23/23`;
+- harmless CLI process smokes: `4/4`;
+- real default-suite compressor outcomes: `xz` accepted and an invalid
+  compressor rejected;
+- runtime locks, journals, pending journals, candidates, backups, probe
+  files, and temporary residue: `0`.
+
+Real root, sudo, mount, unmount, chroot, package, product-ISO, QEMU, Xephyr,
+and GUI operations remain `0`. Actual power-loss behavior, a complete product
+ISO build, native Python 3.8 execution, and the privileged factory cycle
+remain untested.
+
 ## Immediate blockers
 
 1. Characterization coverage does not yet include media recognition or broad
    command construction.
 2. Extract and rebuild remain hard-wired to the older single-SquashFS and
    `isolinux` media layout.
-3. The legacy final-image path does not yet apply `isohybrid`, publish a
-   SHA-256 sidecar, or select compression capability before starting the
-   SquashFS build.
-4. The current host does not have the `isohybrid` command required for the
+3. The current host does not have the `isohybrid` command required for the
    recovered legacy finalization path.
-5. Caller-level mount and host X-access safety has completed root-free
+4. Caller-level mount and host X-access safety has completed root-free
    acceptance but has not completed real privileged acceptance.
-6. Operational privilege handling still reflects the older root-process
+5. Operational privilege handling still reflects the older root-process
    model.
-7. The GUI has not completed real-desktop product acceptance.
+6. The GUI has not completed real-desktop product acceptance.
 
 ## Current acceptance gate
 

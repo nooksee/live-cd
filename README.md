@@ -74,7 +74,8 @@ liveusb/
 - Python 3.8+
 - PyGObject + GTK3 (`gui` extra) for the graphical interface
 - `mount`, `chroot`, `unsquashfs`/`mksquashfs`, `rsync`, `genisoimage`,
-  `qemu-system-*`, `Xephyr`, `wget`, ImageMagick's `convert`
+  `isohybrid` from `syslinux-utils`, `qemu-system-*`, `Xephyr`, `wget`,
+  ImageMagick's `convert`
 
 The backend actions (`live-usb -e/-r/-c/...`) require root.
 

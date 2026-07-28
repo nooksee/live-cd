@@ -91,7 +91,9 @@ sudo bin/live-usb -e     # extract   -r rebuild   -c chroot   -t clean
 bin/live-usb-gui
 ```
 
-The tracked test suite currently contains `9` modules. The accepted
-root-free baseline passes `213/213` tests with GUI support and `212` tests
-with one expected GUI assertion skipped without PyGObject. Real privileged
-and end-to-end acceptance remains pending.
+The tracked test suite currently contains `10` modules. The accepted
+root-free baseline passes `239/239` tests with GUI support and `238` tests
+with one expected GUI assertion skipped without PyGObject. Phase 1D legacy
+final-image generation, mutation, hashing, and crash-durable publication are
+root-free accepted. Real privileged and end-to-end acceptance remains
+pending.

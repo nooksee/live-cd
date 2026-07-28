@@ -1,7 +1,7 @@
 # Phase 1C-2 mount-session candidate evidence
 
 - Date: 2026-07-28
-- Candidate parent: `67d9d11305c5b4206801b677ab48e67ab8d7b856`
+- Correction parent: `5485ff2e9280097285bef84fcc7c4ae0a23fa5d4`
 - Authority: isolated Jacob Codex correction lane
 - Independent Claude acceptance: not yet granted
 
@@ -11,7 +11,7 @@ This candidate governs caller mounts, extraction ISO mounts, host X access,
 temporary staging artifacts, operation-created directories, and recovery
 metadata through one machine-wide operation lock.
 
-The correction changes two product modules, three test modules, and three
+The correction changes exactly one product module, one test module, and two
 control documents. Production remained read-only.
 
 ## Corrected findings
@@ -43,10 +43,19 @@ staging inode, final path, final inode, and lifecycle stage. Creation applies
 the final mode explicitly before atomic rename, which removes dependence on
 the process umask.
 
-Recovery covers interruption before staging creation, after staging creation,
-after staging identity persistence, after rename, and during cleanup.
-Foreign, nonempty, replaced, mounted, symlinked, or identity-mismatched
-evidence is preserved.
+Recovery covers interruption before staging creation, after a
+umask-filtered private mkdir, after final-mode chmod, after staging identity
+persistence, after rename, during recovery before its changed candidate is
+durable, and during cleanup at both the staging and final locations. A
+durable `removing` record retains whether the exact inode is still at its
+staging location or has reached its final location.
+
+Planned-state recovery accepts only a literal, empty, unmounted tokenized
+staging directory whose mode is the desired mode or a permission-subset of
+private mode `0700`. Modes with unproved group or other bits remain rejected.
+Foreign, nonempty, replaced, mounted, symlinked, wrong-location,
+two-live-location, missing-identity, or identity-mismatched evidence is
+preserved.
 
 The remaining boundary is the documented trusted-single-writer model. The
 random staging namespace and machine-wide lock are not a defense against a
@@ -85,11 +94,11 @@ remain rejected.
 
 | Gate | Result |
 | --- | ---: |
-| Focused normal tests | `119/119` |
-| Focused core-only tests | `119/119` |
-| Complete normal suite | `208/208` |
-| Complete core-only suite | `207` pass, `1` expected skip |
-| Python 3.8 grammar | `46/46` |
+| Focused normal tests | `123/123` |
+| Focused core-only tests | `123/123` |
+| Complete normal suite | `212/212` |
+| Complete core-only suite | `211` pass, `1` expected skip |
+| Syntax and Python 3.8 grammar, all Python files | `47/47` |
 | Product imports | `37/37` |
 | Core-only imports | `23/23` |
 | Harmless process smokes | `4/4` |

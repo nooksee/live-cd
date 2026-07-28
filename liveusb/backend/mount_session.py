@@ -1077,15 +1077,12 @@ class MountSession:
                 raise MountRecoveryError(
                     "Staged directory disappeared before cleanup"
                 )
-        if stage in {"created", "removing"}:
+        if stage == "created":
             if staging_exists:
                 raise MountRecoveryError(
                     "Created directory retained foreign staging residue"
                 )
             if not exists:
-                if stage == "removing":
-                    record["stage"] = "removed"
-                    return True
                 raise MountRecoveryError(
                     f"Created directory is absent: {record['path']}"
                 )
@@ -1099,6 +1096,41 @@ class MountSession:
                 raise MountRecoveryError(
                     "Created directory identity changed: "
                     f"{record['path']}"
+                )
+        elif stage == "removing":
+            removing_staging = record["identity"] is None
+            expected_path = (
+                record["staging_path"]
+                if removing_staging
+                else record["path"]
+            )
+            foreign_path = (
+                record["path"]
+                if removing_staging
+                else record["staging_path"]
+            )
+            expected_identity = (
+                record["staging_identity"]
+                if removing_staging
+                else record["identity"]
+            )
+            if os.path.lexists(foreign_path):
+                raise MountRecoveryError(
+                    "Removing directory has a live wrong location"
+                )
+            if not os.path.lexists(expected_path):
+                record["stage"] = "removed"
+                return True
+            if (
+                expected_path not in active_mount_points
+                and not mounts.directory_identity_matches(
+                    expected_path,
+                    expected_identity,
+                )
+            ):
+                raise MountRecoveryError(
+                    "Removing directory identity changed: "
+                    f"{expected_path}"
                 )
         elif stage == "removed" and exists:
             raise MountRecoveryError(
@@ -1119,8 +1151,13 @@ class MountSession:
                 "Unrecorded staging directory evidence is ambiguous"
             )
         identity = mounts.node_identity(record["staging_path"])
+        mode = identity["mode"]
+        private_mkdir_mode = mode & ~0o700 == 0
         if (
-            identity["mode"] != 0o700
+            (
+                mode != record["desired_mode"]
+                and not private_mkdir_mode
+            )
             or os.listdir(record["staging_path"])
         ):
             raise MountRecoveryError(
@@ -1316,20 +1353,16 @@ class MountSession:
         if directory["stage"] in {"staged", "rename-planned"}:
             target = directory["staging_path"]
             expected = directory["staging_identity"]
+        elif (
+            directory["stage"] == "removing"
+            and directory["identity"] is None
+        ):
+            target = directory["staging_path"]
+            expected = directory["staging_identity"]
         else:
             target = directory["path"]
             expected = directory["identity"]
         if directory["stage"] == "removing":
-            target = (
-                directory["staging_path"]
-                if os.path.lexists(directory["staging_path"])
-                else directory["path"]
-            )
-            expected = (
-                directory["staging_identity"]
-                if target == directory["staging_path"]
-                else directory["identity"]
-            )
             if not os.path.lexists(target):
                 directory["stage"] = "removed"
                 self._persist_journal()

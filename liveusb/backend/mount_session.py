@@ -1154,12 +1154,55 @@ class MountSession:
         mode = identity["mode"]
         private_mkdir_mode = mode & ~0o700 == 0
         if (
-            (
-                mode != record["desired_mode"]
-                and not private_mkdir_mode
-            )
-            or os.listdir(record["staging_path"])
+            mode != record["desired_mode"]
+            and not private_mkdir_mode
         ):
+            raise MountRecoveryError(
+                "Unrecorded staging directory is not exact"
+            )
+        normalized_for_inspection = False
+        try:
+            entries = os.listdir(record["staging_path"])
+        except PermissionError:
+            try:
+                os.chmod(
+                    record["staging_path"],
+                    record["desired_mode"],
+                )
+                normalized_for_inspection = True
+                self._fsync_directory(
+                    os.path.dirname(record["staging_path"])
+                )
+                entries = os.listdir(record["staging_path"])
+            except OSError as error:
+                if normalized_for_inspection:
+                    try:
+                        os.chmod(record["staging_path"], mode)
+                        self._fsync_directory(
+                            os.path.dirname(record["staging_path"])
+                        )
+                    except OSError as restore_error:
+                        raise MountRecoveryError(
+                            "Unrecorded staging mode restoration failed"
+                        ) from restore_error
+                raise MountRecoveryError(
+                    "Unrecorded staging directory cannot be inspected"
+                ) from error
+        except OSError as error:
+            raise MountRecoveryError(
+                "Unrecorded staging directory cannot be inspected"
+            ) from error
+        if entries:
+            if normalized_for_inspection:
+                try:
+                    os.chmod(record["staging_path"], mode)
+                    self._fsync_directory(
+                        os.path.dirname(record["staging_path"])
+                    )
+                except OSError as error:
+                    raise MountRecoveryError(
+                        "Unrecorded staging mode restoration failed"
+                    ) from error
             raise MountRecoveryError(
                 "Unrecorded staging directory is not exact"
             )

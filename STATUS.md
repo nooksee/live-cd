@@ -25,8 +25,8 @@ extract → no-change rebuild → QEMU boot cycle promotes the project to
 - Importable product modules: `37/37`.
 - Harmless CLI process smokes returning expected statuses: `4/4`.
 - Current tracked test modules: `9`.
-- Current unit tests passing with GUI support installed: `212/212`.
-- Core-only unit tests passing without optional PyGObject: `211`, with the one
+- Current unit tests passing with GUI support installed: `213/213`.
+- Core-only unit tests passing without optional PyGObject: `212`, with the one
   GUI-specific assertion skipped.
 - Successful remaster cycles produced by the Python implementation: `0`.
 - Successful QEMU boots of Python-generated media: `0`.
@@ -129,9 +129,9 @@ operation-created directories. Recovery uses exact mountinfo identities,
 atomic journals, a private runtime lock, positive mount deltas, tokenized
 directory staging, exact parent and inode custody, and bounded cleanup.
 
-Focused mount-session and extraction-recovery tests pass `123/123` in both
-normal and core-only postures. Complete suites pass `212/212` with GUI
-dependencies and `211` with one expected GUI assertion skipped without
+Focused mount-session and extraction-recovery tests pass `124/124` in both
+normal and core-only postures. Complete suites pass `213/213` with GUI
+dependencies and `212` with one expected GUI assertion skipped without
 PyGObject. Real root, mount, unmount, chroot, package, network, ISO, X,
 Xephyr, QEMU, and GUI operations performed during candidate acceptance remain
 `0`.
@@ -140,8 +140,10 @@ The directory-recovery correction covers initial interruption after private
 mkdir, after final-mode chmod, during recovery before changed state is
 durable, and during staged or created directory removal. Planned staging
 accepts only an empty, unmounted tokenized directory at the desired mode or a
-permission-subset of private mode `0700`; unproved permission bits and foreign
-location, content, mount, or identity evidence remain fail-closed.
+permission-subset of private mode `0700`. Owner-inaccessible private submodes
+are normalized only for inspection, with the original mode restored when
+foreign content is found. Unproved permission bits and foreign location,
+content, mount, or identity evidence remain fail-closed.
 
 This is candidate evidence. Independent Claude acceptance has not yet been
 granted. The detailed record is

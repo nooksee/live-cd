@@ -2,7 +2,8 @@
 
 - Date: 2026-07-28
 - Correction parent: `5485ff2e9280097285bef84fcc7c4ae0a23fa5d4`
-- Authority: isolated Jacob Codex correction lane
+- Authority: isolated Jacob Codex correction lane with George Prime final
+  audit correction
 - Independent Claude acceptance: not yet granted
 
 ## Scope
@@ -53,6 +54,9 @@ staging location or has reached its final location.
 Planned-state recovery accepts only a literal, empty, unmounted tokenized
 staging directory whose mode is the desired mode or a permission-subset of
 private mode `0700`. Modes with unproved group or other bits remain rejected.
+An owner-inaccessible private submode is normalized only long enough to inspect
+the tokenized staging directory; foreign content causes the original mode to
+be restored before recovery fails closed.
 Foreign, nonempty, replaced, mounted, symlinked, wrong-location,
 two-live-location, missing-identity, or identity-mismatched evidence is
 preserved.
@@ -94,10 +98,10 @@ remain rejected.
 
 | Gate | Result |
 | --- | ---: |
-| Focused normal tests | `123/123` |
-| Focused core-only tests | `123/123` |
-| Complete normal suite | `212/212` |
-| Complete core-only suite | `211` pass, `1` expected skip |
+| Focused normal tests | `124/124` |
+| Focused core-only tests | `124/124` |
+| Complete normal suite | `213/213` |
+| Complete core-only suite | `212` pass, `1` expected skip |
 | Syntax and Python 3.8 grammar, all Python files | `47/47` |
 | Product imports | `37/37` |
 | Core-only imports | `23/23` |

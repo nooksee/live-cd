@@ -822,7 +822,7 @@ class MountRecoveryTests(unittest.TestCase):
         real_mkdir = os.mkdir
 
         def create_filtered_then_interrupt(path, mode):
-            real_mkdir(path, 0o500)
+            real_mkdir(path, 0o200)
             raise KeyboardInterrupt("synthetic umask-filtered crash")
 
         with mock.patch.object(
@@ -835,7 +835,7 @@ class MountRecoveryTests(unittest.TestCase):
         staging = Path(
             abandoned._state["directories"][0]["staging_path"]
         )
-        self.assertEqual(stat.S_IMODE(staging.stat().st_mode), 0o500)
+        self.assertEqual(stat.S_IMODE(staging.stat().st_mode), 0o200)
         self.abandon(abandoned)
 
         with self.session():
@@ -844,6 +844,47 @@ class MountRecoveryTests(unittest.TestCase):
         self.assertFalse(staging.exists())
         self.assertFalse((self.fs_dir / "tmp").exists())
         self.assert_correction_recovery_clean()
+
+    def test_inaccessible_nonempty_staging_mode_is_restored(self):
+        os.rmdir(self.fs_dir / "tmp")
+        source = self.root / "source.deb"
+        source.write_bytes(b"directory inaccessible payload")
+        abandoned = self.session()
+        abandoned.__enter__()
+        real_mkdir = os.mkdir
+
+        def create_foreign_then_interrupt(path, mode):
+            real_mkdir(path, 0o700)
+            Path(path, "foreign").write_bytes(b"preserve")
+            os.chmod(path, 0o200)
+            raise KeyboardInterrupt("synthetic inaccessible staging")
+
+        with mock.patch.object(
+            mount_session.os,
+            "mkdir",
+            side_effect=create_foreign_then_interrupt,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                abandoned.stage_file(str(source), "deb", suffix=".deb")
+        staging = Path(
+            abandoned._state["directories"][0]["staging_path"]
+        )
+        self.abandon(abandoned)
+        journal_before = self.journal_path.read_bytes()
+
+        with self.assertRaisesRegex(MountRecoveryError, "not exact"):
+            self.session().__enter__()
+
+        self.assertEqual(self.journal_path.read_bytes(), journal_before)
+        self.assertTrue(staging.is_dir())
+        self.assertEqual(stat.S_IMODE(staging.stat().st_mode), 0o200)
+        self.assertEqual(self.table.identities, [])
+        self.assertEqual(self.x_access.mutations, [])
+        staging.chmod(0o700)
+        self.assertEqual(
+            (staging / "foreign").read_bytes(),
+            b"preserve",
+        )
 
     def test_planned_directory_unproved_mode_is_preserved(self):
         os.rmdir(self.fs_dir / "tmp")

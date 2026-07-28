@@ -143,6 +143,158 @@ class CleanExtractRecoveryBoundaryTests(unittest.TestCase):
         self.assertFalse(
             (self.root / "runtime/mount-session.json").exists()
         )
+        self.assertEqual(
+            self.table.unmount_commands,
+            [["umount", "-f", str(mount_point)]],
+        )
+
+    def test_stale_iso_recovery_is_independent_of_current_iso(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        acquisition = abandoned.mount_iso()
+        mount_point = Path(acquisition.destination)
+        abandoned._release_runtime_lock()
+        replacement = self.root / "replacement.iso"
+        replacement.write_bytes(b"different synthetic ISO")
+        self.ctx.iso = str(replacement)
+
+        with self.session():
+            pass
+
+        self.assertFalse(mount_point.exists())
+        self.assertEqual(len(self.table.unmount_commands), 1)
+
+    def test_changed_iso_source_preserves_custody_without_unmount(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        acquisition = abandoned.mount_iso()
+        abandoned._release_runtime_lock()
+        self.iso.write_bytes(b"replaced ISO content")
+        journal = self.root / "runtime/mount-session.json"
+        before = journal.read_bytes()
+
+        with self.assertRaises(MountRecoveryError):
+            self.session().__enter__()
+
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertTrue(Path(acquisition.destination).exists())
+
+    def test_interrupted_iso_mount_exact_delta_is_recovered(self):
+        def interrupt_after_mount(command):
+            self.table.mount_commands.append(list(command))
+            self.table.add(
+                command[-1],
+                source="/dev/loop-test",
+                fs_type="iso9660",
+                mount_options=("ro",),
+                super_options=("ro",),
+            )
+            raise KeyboardInterrupt("synthetic ISO mount interruption")
+
+        abandoned = MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=interrupt_after_mount,
+            unmount_runner=self.table.unmount,
+            x_query=self.x_access.query,
+            x_mutator=self.x_access.mutate,
+        )
+        abandoned.__enter__()
+        with self.assertRaises(KeyboardInterrupt):
+            abandoned.mount_iso()
+        mount_point = Path(
+            abandoned._state["mounts"][0]["destination"]
+        )
+        abandoned._release_runtime_lock()
+
+        with self.session():
+            pass
+
+        self.assertFalse(mount_point.exists())
+        self.assertEqual(len(self.table.unmount_commands), 1)
+
+    def test_interrupted_iso_directory_creation_is_recovered(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        real_mkdir = os.mkdir
+
+        def create_then_interrupt(path, mode):
+            real_mkdir(path, mode)
+            raise KeyboardInterrupt("synthetic ISO mkdir interruption")
+
+        with mock.patch.object(
+            os,
+            "mkdir",
+            side_effect=create_then_interrupt,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                abandoned.mount_iso()
+        destination = Path(
+            abandoned._state["mounts"][0]["destination"]
+        )
+        abandoned._release_runtime_lock()
+
+        with self.session():
+            pass
+
+        self.assertFalse(destination.exists())
+        self.assertEqual(self.table.mount_commands, [])
+
+    def test_iso_mountpoint_is_private(self):
+        session = self.session()
+        session.__enter__()
+        acquisition = session.mount_iso()
+
+        self.assertEqual(
+            os.stat(acquisition.destination).st_mode & 0o777,
+            0o700,
+        )
+        session.cleanup()
+        session._release_runtime_lock()
+
+    def test_iso_destination_rejects_symlinked_ancestor(self):
+        real_root = self.root / "real-mount"
+        real_root.mkdir()
+        linked_root = self.root / "linked-mount"
+        linked_root.symlink_to(real_root, target_is_directory=True)
+        self.ctx.mount_dir = str(linked_root)
+
+        with self.assertRaises(mounts.MountEvidenceError):
+            mounts.validate_iso_mount_destination(
+                self.ctx,
+                str(linked_root / "candidate"),
+            )
+
+    def test_iso_destination_rejects_nested_and_foreign_paths(self):
+        candidates = (
+            self.mount_dir,
+            self.mount_dir / "nested" / "candidate",
+            self.root / "foreign" / "candidate",
+            self.mount_dir / ".." / "escape",
+        )
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(mounts.MountEvidenceError):
+                    mounts.validate_iso_mount_destination(
+                        self.ctx,
+                        str(candidate),
+                    )
+
+    def test_iso_custody_rejects_replaced_mount_root(self):
+        request = mounts.iso_mount_request(
+            self.ctx,
+            str(self.mount_dir / "candidate"),
+        )
+        moved = self.root / "old-mount"
+        self.mount_dir.rename(moved)
+        self.mount_dir.mkdir()
+
+        with self.assertRaisesRegex(
+            mounts.MountEvidenceError,
+            "custody changed",
+        ):
+            mounts.validate_iso_custody(request)
 
     def test_replaced_iso_mount_is_preserved_without_unmount(self):
         abandoned = self.session()
@@ -277,6 +429,7 @@ class CleanExtractRecoveryBoundaryTests(unittest.TestCase):
 
         self.assertEqual(events, ["purge"])
         self.assertTrue(self.table.identities)
+        self.assertEqual(len(self.table.unmount_commands), 1)
 
     def test_architecture_mismatch_purges_after_cleanup(self):
         shutil.rmtree(self.work_dir)

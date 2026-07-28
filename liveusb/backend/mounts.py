@@ -29,13 +29,16 @@ _X_STATUS_ENABLED = (
 _X_STATUS_DISABLED = (
     "access control disabled, clients can connect from any host"
 )
-_X_ENTRY = re.compile(
-    r"(?:LOCAL:|(?:SI|INET|INET6|DNET|NIS|KRB):[^\s:]+(?::[^\s:]+)*)"
-)
 _SEMANTIC_BOOLEAN_OPTIONS = (
     "nodev",
     "noexec",
     "nosuid",
+)
+_SEMANTIC_MOUNT_BOOLEAN_OPTIONS = (
+    "nodev",
+    "noexec",
+    "nosuid",
+    "nosymfollow",
 )
 _SEMANTIC_ATIME_OPTIONS = (
     "noatime",
@@ -182,6 +185,8 @@ class MountRequest:
     label: str
     options: Tuple[str, ...]
     recursive: bool = False
+    kind: str = "filesystem"
+    custody: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -355,7 +360,12 @@ def identity_map(identities):
 
 
 def node_identity(path):
-    stat_result = os.lstat(path)
+    try:
+        stat_result = os.lstat(path)
+    except OSError as error:
+        raise MountEvidenceError(
+            f"Unable to inspect mount directory: {path}"
+        ) from error
     if not stat.S_ISDIR(stat_result.st_mode):
         raise MountEvidenceError(
             f"Mount directory is not an lstat directory: {path}"
@@ -470,17 +480,136 @@ def validate_extract_layout(ctx):
     return work_root, mount_root
 
 
+def literal_directory_chain(path):
+    """Capture the complete literal directory chain through path."""
+    absolute = os.path.abspath(path)
+    try:
+        root_state = os.lstat(os.sep)
+    except OSError as error:
+        raise MountEvidenceError(
+            "Unable to inspect the filesystem root"
+        ) from error
+    chain = [{
+        "dev": root_state.st_dev,
+        "ino": root_state.st_ino,
+        "mode": stat.S_IMODE(root_state.st_mode),
+        "path": os.sep,
+    }]
+    cursor = os.sep
+    for component in absolute.split(os.sep):
+        if not component:
+            continue
+        cursor = os.path.join(cursor, component)
+        try:
+            state = os.lstat(cursor)
+        except OSError as error:
+            raise MountEvidenceError(
+                f"Directory chain is incomplete: {cursor}"
+            ) from error
+        if (
+            stat.S_ISLNK(state.st_mode)
+            or not stat.S_ISDIR(state.st_mode)
+        ):
+            raise MountEvidenceError(
+                f"Directory chain is not literal: {cursor}"
+            )
+        chain.append({
+            "dev": state.st_dev,
+            "ino": state.st_ino,
+            "mode": stat.S_IMODE(state.st_mode),
+            "path": cursor,
+        })
+    return tuple(chain)
+
+
+def validate_literal_directory_chain(records):
+    """Verify a captured literal chain without following replacements."""
+    if not isinstance(records, (list, tuple)) or not records:
+        raise MountEvidenceError("Directory custody chain is invalid")
+    previous = None
+    for index, record in enumerate(records):
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"dev", "ino", "mode", "path"}
+            or not isinstance(record["path"], str)
+            or not os.path.isabs(record["path"])
+            or os.path.normpath(record["path"]) != record["path"]
+            or (
+                index == 0
+                and record["path"] != os.sep
+            )
+            or (
+                index > 0
+                and os.path.dirname(record["path"]) != previous
+            )
+            or any(
+                type(record[field]) is not int
+                or record[field] < 0
+                for field in ("dev", "ino", "mode")
+            )
+        ):
+            raise MountEvidenceError("Directory custody chain is invalid")
+        try:
+            state = os.lstat(record["path"])
+        except OSError as error:
+            raise MountEvidenceError(
+                f"Directory custody is unavailable: {record['path']}"
+            ) from error
+        if (
+            stat.S_ISLNK(state.st_mode)
+            or not stat.S_ISDIR(state.st_mode)
+            or state.st_dev != record["dev"]
+            or state.st_ino != record["ino"]
+            or stat.S_IMODE(state.st_mode) != record["mode"]
+        ):
+            raise MountEvidenceError(
+                f"Directory custody changed: {record['path']}"
+            )
+        previous = record["path"]
+    return records[-1]["path"]
+
+
+def iso_source_identity(path):
+    absolute = os.path.abspath(path)
+    try:
+        state = os.stat(absolute, follow_symlinks=True)
+    except OSError as error:
+        raise MountEvidenceError(
+            f"ISO source is unavailable: {absolute}"
+        ) from error
+    if not stat.S_ISREG(state.st_mode):
+        raise MountEvidenceError(
+            f"ISO source is not a regular file: {absolute}"
+        )
+    return {
+        "dev": state.st_dev,
+        "ino": state.st_ino,
+        "mode": stat.S_IMODE(state.st_mode),
+        "path": absolute,
+        "size": state.st_size,
+    }
+
+
 def iso_mount_request(ctx, destination):
     """Build one confined ISO request for the configured image."""
     validate_extract_layout(ctx)
     source = os.path.abspath(ctx.iso)
     destination = validate_iso_mount_destination(ctx, destination)
+    mount_root = os.path.abspath(ctx.mount_dir)
     return MountRequest(
         source=source,
         destination=destination,
         label=ISO_MOUNT_LABEL,
         options=ISO_MOUNT_OPTIONS,
         recursive=False,
+        kind="iso",
+        custody={
+            "mount_root": mount_root,
+            "mount_root_chain": list(
+                literal_directory_chain(mount_root)
+            ),
+            "source": iso_source_identity(source),
+        },
     )
 
 
@@ -490,23 +619,15 @@ def validate_iso_mount_destination(ctx, destination):
     raw_mount_root = os.path.abspath(ctx.mount_dir)
     absolute = os.path.abspath(destination)
     if (
-        os.path.normpath(destination) != absolute
+        not os.path.isabs(destination)
+        or os.path.normpath(destination) != absolute
         or os.path.dirname(absolute) != raw_mount_root
-        or not _path_within(
-            raw_mount_root,
-            absolute,
-            include_root=False,
-        )
     ):
         raise MountEvidenceError(
             f"ISO mount destination escapes mount staging: {destination}"
         )
-    if (
-        not os.path.lexists(raw_mount_root)
-        or os.path.islink(raw_mount_root)
-        or not stat.S_ISDIR(os.lstat(raw_mount_root).st_mode)
-        or os.path.realpath(raw_mount_root) != mount_root
-    ):
+    literal_directory_chain(raw_mount_root)
+    if os.path.realpath(raw_mount_root) != mount_root:
         raise MountEvidenceError(
             "ISO mount staging root is not a literal directory"
         )
@@ -526,12 +647,69 @@ def validate_iso_mount_destination(ctx, destination):
     return absolute
 
 
+def validate_iso_custody(request):
+    """Validate an ISO request solely from its durable custody record."""
+    custody = request.custody
+    if (
+        request.kind != "iso"
+        or not isinstance(custody, dict)
+        or set(custody)
+        != {"mount_root", "mount_root_chain", "source"}
+        or request.label != ISO_MOUNT_LABEL
+        or tuple(request.options) != ISO_MOUNT_OPTIONS
+        or request.recursive
+    ):
+        raise MountEvidenceError("ISO custody metadata is invalid")
+    mount_root = custody["mount_root"]
+    if (
+        not isinstance(mount_root, str)
+        or not os.path.isabs(mount_root)
+        or os.path.normpath(mount_root) != mount_root
+        or os.path.dirname(request.destination) != mount_root
+    ):
+        raise MountEvidenceError("ISO mount-root custody is invalid")
+    if validate_literal_directory_chain(
+        custody["mount_root_chain"]
+    ) != mount_root:
+        raise MountEvidenceError("ISO mount-root custody is incomplete")
+    source = custody["source"]
+    if (
+        not isinstance(source, dict)
+        or set(source) != {"dev", "ino", "mode", "path", "size"}
+        or source["path"] != request.source
+        or any(
+            type(source[field]) is not int or source[field] < 0
+            for field in ("dev", "ino", "mode", "size")
+        )
+    ):
+        raise MountEvidenceError("ISO source custody is invalid")
+    current = iso_source_identity(request.source)
+    if current != source:
+        raise MountEvidenceError("ISO source custody changed")
+    if os.path.lexists(request.destination):
+        try:
+            state = os.lstat(request.destination)
+        except OSError as error:
+            raise MountEvidenceError(
+                "Unable to inspect ISO mount destination"
+            ) from error
+        if (
+            stat.S_ISLNK(state.st_mode)
+            or not stat.S_ISDIR(state.st_mode)
+        ):
+            raise MountEvidenceError(
+                "ISO mount destination is not a literal directory"
+            )
+    return request.destination
+
+
 def is_authorized_iso_request(ctx, request):
     if (
         request.label != ISO_MOUNT_LABEL
         or tuple(request.options) != ISO_MOUNT_OPTIONS
         or request.recursive
         or request.source != os.path.abspath(ctx.iso)
+        or request.kind != "iso"
     ):
         return False
     try:
@@ -635,10 +813,10 @@ def run_mount(request, runner=None):
     return getattr(result, "returncode", 1) == 0
 
 
-def run_unmount(identity, runner=None):
+def run_unmount(identity, runner=None, lazy=True):
     selected_runner = run_ok if runner is None else runner
     result = selected_runner(
-        ["umount", "-fl", identity.mount_point]
+        ["umount", "-fl" if lazy else "-f", identity.mount_point]
     )
     if type(result) is bool:
         return result
@@ -781,7 +959,7 @@ def _effective_mount_semantics(identity):
 
     mount_boolean = tuple(
         option in mount_options
-        for option in _SEMANTIC_BOOLEAN_OPTIONS
+        for option in _SEMANTIC_MOUNT_BOOLEAN_OPTIONS
     )
     super_boolean = tuple(
         option in super_options
@@ -945,9 +1123,24 @@ def parse_xhost_output(text):
         raise XAccessEvidenceError(
             "X access-control state is unparsable"
         )
+    def valid_entry(line):
+        if line == "LOCAL:":
+            return True
+        family, separator, payload = line.partition(":")
+        if (
+            not separator
+            or family not in {"SI", "INET", "INET6", "DNET", "NIS", "KRB"}
+            or not payload
+            or any(character.isspace() for character in payload)
+        ):
+            return False
+        if family == "INET6":
+            return re.fullmatch(r"[0-9A-Fa-f:.%]+", payload) is not None
+        return not payload.startswith(":") and not payload.endswith(":")
+
     if any(
         line.startswith("access control ")
-        or _X_ENTRY.fullmatch(line) is None
+        or not valid_entry(line)
         for line in lines[1:]
     ):
         raise XAccessEvidenceError(

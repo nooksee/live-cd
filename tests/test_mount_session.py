@@ -242,7 +242,6 @@ class MountEvidenceTests(unittest.TestCase):
             "SI:localuser:operator\n"
             "LOCAL:\n"
         )
-
         self.assertEqual(
             state,
             mounts.XAccessState(
@@ -250,6 +249,18 @@ class MountEvidenceTests(unittest.TestCase):
                 local_present=True,
             ),
         )
+
+    def test_xhost_parser_accepts_realistic_ipv6_entries(self):
+        state = mounts.parse_xhost_output(
+            "access control enabled, only authorized clients can connect\n"
+            "INET6:::1\n"
+            "INET6:fe80::1\n"
+            "INET:127.0.0.1\n"
+            "SI:localuser:operator\n"
+        )
+
+        self.assertTrue(state.enabled)
+        self.assertFalse(state.local_present)
 
     def test_xhost_parser_recognizes_disabled_access_control(self):
         state = mounts.parse_xhost_output(
@@ -272,6 +283,8 @@ class MountEvidenceTests(unittest.TestCase):
             "connect suffix\n",
             "access control enabled, only authorized clients can connect\n"
             "UNKNOWN:entry\n",
+            "access control enabled, only authorized clients can connect\n"
+            "INET6:not-an-address\n",
             "access control disabled, clients can connect from any host\n"
             "access control enabled, only authorized clients can connect\n",
             " access control enabled, only authorized clients can connect\n",
@@ -298,6 +311,37 @@ class MountEvidenceTests(unittest.TestCase):
         environment = run_command.call_args.kwargs["env"]
         self.assertEqual(environment["LANG"], "C")
         self.assertEqual(environment["LC_ALL"], "C")
+
+    def test_nosymfollow_mismatch_rejects_mount_equivalence(self):
+        source = mount_identity(
+            40,
+            "/source",
+            mount_options=("rw", "nosymfollow"),
+        )
+        destination = mount_identity(
+            41,
+            "/destination",
+            source=source.source,
+            major_minor=source.major_minor,
+            root=source.root,
+            fs_type=source.fs_type,
+            mount_options=("rw",),
+        )
+        request = mounts.MountRequest(
+            "/source",
+            "/destination",
+            "test",
+            ("--bind",),
+        )
+
+        with self.assertRaisesRegex(
+            mounts.MountEvidenceError,
+            "does not match",
+        ):
+            mounts.prove_preexisting_mount(
+                request,
+                (source, destination),
+            )
 
 
 class MountSessionTests(unittest.TestCase):
@@ -737,6 +781,24 @@ class MountSessionTests(unittest.TestCase):
             session.allow_local_x_access()
 
         self.assertEqual(self.x_access.mutations, [])
+        self.assert_runtime_clean()
+
+    def test_no_change_x_state_may_be_reevaluated_for_a_grant(self):
+        self.x_access = FakeXAccess(
+            enabled=False,
+            local_present=False,
+        )
+
+        with self.session() as session:
+            session.allow_local_x_access()
+            self.x_access.state = mounts.XAccessState(
+                enabled=True,
+                local_present=False,
+            )
+            session.allow_local_x_access()
+
+        self.assertEqual(self.x_access.mutations, [True, False])
+        self.assertFalse(self.x_access.state.local_present)
         self.assert_runtime_clean()
 
     def test_preexisting_local_acl_is_not_revoked(self):

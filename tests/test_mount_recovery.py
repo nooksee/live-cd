@@ -377,7 +377,7 @@ class MountRecoveryTests(unittest.TestCase):
         self.assertEqual(self.table.identities, [])
         self.assert_hard_recovery_clean()
 
-    def test_planned_directory_end_state_is_not_adopted(self):
+    def test_planned_directory_exact_end_state_is_recovered(self):
         os.rmdir(self.fs_dir / "tmp")
         source = self.root / "source.deb"
         source.write_bytes(b"directory crash payload")
@@ -406,20 +406,6 @@ class MountRecoveryTests(unittest.TestCase):
         self.abandon(abandoned)
 
         self.assertTrue((self.fs_dir / "tmp").is_dir())
-        journal_before = self.journal_path.read_bytes()
-
-        with self.assertRaisesRegex(
-            MountRecoveryError,
-            "end state is unproved",
-        ):
-            self.session().__enter__()
-
-        self.assertEqual(
-            self.journal_path.read_bytes(),
-            journal_before,
-        )
-        os.rmdir(self.fs_dir / "tmp")
-
         with self.session():
             pass
 
@@ -682,7 +668,7 @@ class MountRecoveryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             MountRecoveryError,
-            "does not match its pre-state",
+            "ownership is ambiguous",
         ):
             self.session().__enter__()
 
@@ -697,6 +683,76 @@ class MountRecoveryTests(unittest.TestCase):
             pass
 
         self.assert_hard_recovery_clean()
+
+    def test_interrupted_mount_exact_delta_is_recovered(self):
+        source = self.table.add("/dev", source="/dev")
+
+        def interrupt_after_mount(command):
+            destination = os.path.abspath(command[-1])
+            self.table.mount_commands.append(list(command))
+            self.table.add(
+                destination,
+                source=source.source,
+                major_minor=source.major_minor,
+                root=source.root,
+                fs_type=source.fs_type,
+                mount_options=source.mount_options,
+                super_options=source.super_options,
+            )
+            raise KeyboardInterrupt("synthetic post-mount interruption")
+
+        abandoned = MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=interrupt_after_mount,
+            unmount_runner=self.table.unmount,
+            x_query=self.x_access.query,
+            x_mutator=self.x_access.mutate,
+        )
+        abandoned.__enter__()
+        with self.assertRaises(KeyboardInterrupt):
+            abandoned.mount_sys()
+        self.abandon(abandoned)
+
+        with self.session():
+            pass
+
+        self.assertEqual(
+            tuple(identity.mount_point for identity in self.table.identities),
+            ("/dev",),
+        )
+        self.assertEqual(len(self.table.unmount_commands), 1)
+        self.assert_hard_recovery_clean()
+
+    def test_planned_directory_ambiguous_mode_is_preserved(self):
+        os.rmdir(self.fs_dir / "tmp")
+        source = self.root / "source.deb"
+        source.write_bytes(b"directory crash payload")
+        abandoned = self.session()
+        abandoned.__enter__()
+        real_mkdir = os.mkdir
+
+        def create_then_interrupt(path, mode):
+            real_mkdir(path, 0o700)
+            raise RuntimeError("synthetic mkdir interruption")
+
+        with mock.patch.object(
+            mount_session.os,
+            "mkdir",
+            side_effect=create_then_interrupt,
+        ):
+            with self.assertRaises(RuntimeError):
+                abandoned.stage_file(str(source), "deb", suffix=".deb")
+        self.abandon(abandoned)
+        before = self.journal_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "ambiguous",
+        ):
+            self.session().__enter__()
+
+        self.assertEqual(self.journal_path.read_bytes(), before)
 
     def test_interrupted_mount_at_prestate_resolves_without_ownership(self):
         def interrupt_without_mount(_command):

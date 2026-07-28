@@ -145,6 +145,7 @@ class MountSession:
         self._journal_active = False
         self._entered = False
         self._recovering = False
+        self._cleanup_attempted = False
 
     def __del__(self):
         descriptor = getattr(self, "_lock_descriptor", None)
@@ -189,18 +190,19 @@ class MountSession:
 
     def __exit__(self, _exc_type, primary_error, _traceback):
         failures = []
-        try:
-            self.cleanup()
-        except MountSessionCleanupError as cleanup_error:
-            failures.extend(cleanup_error.failures)
-        except Exception as error:
-            failures.append(
-                MountCleanupFailure(
-                    "cleanup_mount_session",
-                    self.journal_path,
-                    error,
+        if not self._cleanup_attempted:
+            try:
+                self.cleanup()
+            except MountSessionCleanupError as cleanup_error:
+                failures.extend(cleanup_error.failures)
+            except Exception as error:
+                failures.append(
+                    MountCleanupFailure(
+                        "cleanup_mount_session",
+                        self.journal_path,
+                        error,
+                    )
                 )
-            )
         try:
             self._release_runtime_lock()
         except Exception as error:
@@ -422,6 +424,7 @@ class MountSession:
         return "/" + os.path.relpath(destination, self.ctx.fs_dir)
 
     def cleanup(self):
+        self._cleanup_attempted = True
         acquired_here = False
         recovering_here = False
         if (
@@ -544,6 +547,8 @@ class MountSession:
             label=request.label,
             options=request.options,
             recursive=request.recursive,
+            kind=request.kind,
+            custody=request.custody,
         )
         before_all = self._read_mounts()
         before = mounts.mounts_under(
@@ -588,6 +593,8 @@ class MountSession:
             "owned": [],
             "recursive": request.recursive,
             "source": request.source,
+            "kind": request.kind,
+            "custody": request.custody,
             "stage": (
                 "already-present"
                 if existing
@@ -604,7 +611,7 @@ class MountSession:
                 observed_after=before,
             )
 
-        self._ensure_directory(destination)
+        self._ensure_directory(request)
         self._validate_mount_destination(request)
         before_command = mounts.mounts_under(
             self._read_mounts(),
@@ -713,7 +720,6 @@ class MountSession:
             )
             if plan["stage"] in {
                 "planned",
-                "command-started",
                 "failed",
                 "ambiguous",
                 "already-present",
@@ -740,6 +746,39 @@ class MountSession:
                         ) from error
                 elif plan["stage"] != "failed":
                     plan["stage"] = "failed"
+                    changed = True
+
+            if plan["stage"] == "command-started":
+                if mounts.identity_map(
+                    current_scoped
+                ) == mounts.identity_map(before):
+                    plan["stage"] = "failed"
+                    changed = True
+                else:
+                    try:
+                        owned = self._prove_interrupted_mount(
+                            plan,
+                            current,
+                            before,
+                        )
+                    except mounts.MountEvidenceError as error:
+                        raise MountRecoveryError(
+                            "Interrupted mount ownership is ambiguous: "
+                            f"{plan['destination']}"
+                        ) from error
+                    plan["observed_after"] = [
+                        identity.to_record()
+                        for identity in current_scoped
+                    ]
+                    plan["owned"] = [
+                        {
+                            "identity": identity.to_record(),
+                            "inferred": True,
+                            "stage": "owned",
+                        }
+                        for identity in owned
+                    ]
+                    plan["stage"] = "owned"
                     changed = True
 
             if plan["stage"] == "owned":
@@ -778,6 +817,47 @@ class MountSession:
             self._persist_journal()
         else:
             self._state = candidate
+
+    def _prove_interrupted_mount(self, plan, current, before):
+        """Adopt only one exact mount delta after a recorded syscall."""
+        request = self._request_from_plan(plan)
+        current_scoped = mounts.mounts_under(
+            current,
+            request.destination,
+            include_root=True,
+        )
+        before_map = mounts.identity_map(before)
+        current_map = mounts.identity_map(current_scoped)
+        if any(key not in current_map for key in before_map):
+            raise mounts.MountEvidenceError(
+                "Interrupted mount changed its recorded pre-state"
+            )
+        added = tuple(
+            identity
+            for key, identity in current_map.items()
+            if key not in before_map
+        )
+        if request.kind == "iso":
+            mounts.validate_iso_custody(request)
+            roots = mounts.mounts_at(added, request.destination)
+            if (
+                len(added) != 1
+                or len(roots) != 1
+                or roots[0].fs_type != "iso9660"
+                or "ro" not in set(roots[0].mount_options).union(
+                    roots[0].super_options
+                )
+            ):
+                raise mounts.MountEvidenceError(
+                    "Interrupted ISO mount delta is not exact"
+                )
+            return roots
+        proven = mounts.prove_preexisting_mount(request, current)
+        if mounts.identity_map(proven) != mounts.identity_map(added):
+            raise mounts.MountEvidenceError(
+                "Interrupted mount delta is not request-compatible"
+            )
+        return proven
 
     def _preflight_owned_plan(self, plan, current):
         changed = False
@@ -935,10 +1015,33 @@ class MountSession:
         exists = os.path.lexists(record["path"])
         if stage == "planned":
             if exists:
-                raise MountRecoveryError(
-                    "Planned directory end state is unproved: "
-                    f"{record['path']}"
+                expected_mode = (
+                    0o700
+                    if self._is_persisted_iso_destination(
+                        record["path"]
+                    )
+                    else 0o755
                 )
+                current_mounts = mounts.mounts_under(
+                    self._read_mounts(),
+                    record["path"],
+                    include_root=True,
+                )
+                try:
+                    identity = mounts.node_identity(record["path"])
+                except mounts.MountEvidenceError as error:
+                    raise MountRecoveryError(
+                        "Planned directory end state is unproved: "
+                        f"{record['path']}"
+                    ) from error
+                if current_mounts or identity["mode"] != expected_mode:
+                    raise MountRecoveryError(
+                        "Planned directory end state is ambiguous: "
+                        f"{record['path']}"
+                    )
+                record["identity"] = identity
+                record["stage"] = "created"
+                return True
             record["stage"] = "removed"
             return True
         if stage in {"created", "removing"}:
@@ -1055,7 +1158,7 @@ class MountSession:
                 )
         return False
 
-    def _cleanup_owned_mount(self, _plan, owned):
+    def _cleanup_owned_mount(self, plan, owned):
         identity = mounts.MountIdentity.from_record(
             owned["identity"]
         )
@@ -1083,6 +1186,7 @@ class MountSession:
         command_succeeded = mounts.run_unmount(
             identity,
             runner=self._unmount_runner,
+            lazy=plan.get("kind") != "iso",
         )
         after = self._read_mounts()
         before_keys = set(mounts.identity_map(current))
@@ -1309,12 +1413,15 @@ class MountSession:
             active.append("x:LOCAL:")
         return tuple(active)
 
-    def _ensure_directory(self, destination):
-        if self._is_iso_destination(destination):
-            mounts.validate_iso_mount_destination(
-                self.ctx,
-                destination,
-            )
+    def _ensure_directory(self, request):
+        if isinstance(request, mounts.MountRequest):
+            destination = request.destination
+            iso_request = request if request.kind == "iso" else None
+        else:
+            destination = request
+            iso_request = None
+        if iso_request is not None:
+            mounts.validate_iso_custody(request)
             missing = (
                 (destination,)
                 if not os.path.lexists(destination)
@@ -1335,11 +1442,8 @@ class MountSession:
             }
             self._state["directories"].append(record)
             self._persist_journal()
-            if self._is_iso_destination(path):
-                mounts.validate_iso_mount_destination(
-                    self.ctx,
-                    path,
-                )
+            if iso_request is not None:
+                mounts.validate_iso_custody(iso_request)
             else:
                 mounts.validate_mount_destination(self.ctx, path)
             if not mounts.directory_identity_matches(
@@ -1349,7 +1453,7 @@ class MountSession:
                 raise MountRecoveryError(
                     f"Directory parent changed before creation: {parent}"
                 )
-            os.mkdir(path, 0o755)
+            os.mkdir(path, 0o700 if iso_request is not None else 0o755)
             self._fsync_directory(parent)
             record["identity"] = mounts.node_identity(path)
             record["stage"] = "created"
@@ -1473,14 +1577,13 @@ class MountSession:
             label=plan["label"],
             options=tuple(plan["options"]),
             recursive=plan["recursive"],
+            kind=plan["kind"],
+            custody=plan["custody"],
         )
 
     def _validate_mount_destination(self, request):
-        if mounts.is_authorized_iso_request(self.ctx, request):
-            return mounts.validate_iso_mount_destination(
-                self.ctx,
-                request.destination,
-            )
+        if request.kind == "iso":
+            return mounts.validate_iso_custody(request)
         return mounts.validate_mount_destination(
             self.ctx,
             request.destination,
@@ -1497,8 +1600,19 @@ class MountSession:
             )
         )
 
+    def _is_persisted_iso_destination(self, destination):
+        return any(
+            plan.get("kind") == "iso"
+            and plan["destination"] == destination
+            for plan in self._state["mounts"]
+        )
+
     def _request_is_authorized(self, request):
-        if mounts.is_authorized_iso_request(self.ctx, request):
+        if request.kind == "iso":
+            try:
+                mounts.validate_iso_custody(request)
+            except mounts.MountEvidenceError:
+                return False
             return True
         return any(
             self._request_signature(request)
@@ -1516,6 +1630,7 @@ class MountSession:
             request.label,
             tuple(request.options),
             request.recursive,
+            request.kind,
         )
 
     def _initialize_journal(self):
@@ -1550,6 +1665,7 @@ class MountSession:
             },
         }
         self._journal_active = False
+        self._cleanup_attempted = False
         self._persist_journal()
 
     def _recover_existing_transaction(self):
@@ -1891,8 +2007,10 @@ class MountSession:
         ):
             stable = (
                 "before",
+                "custody",
                 "destination",
                 "id",
+                "kind",
                 "label",
                 "options",
                 "recursive",
@@ -2161,7 +2279,7 @@ class MountSession:
                 "no-change",
                 "grant-planned",
             },
-            "no-change": {"no-change"},
+            "no-change": {"no-change", "grant-planned"},
             "grant-planned": {
                 "grant-planned",
                 "owned",
@@ -2186,6 +2304,14 @@ class MountSession:
                 previous["before"] is not None
                 or candidate["before"] is None
             ):
+                raise MountRecoveryError(
+                    "Pending journal X pre-state transition is invalid"
+                )
+        elif (
+            previous["stage"] == "no-change"
+            and candidate["stage"] == "grant-planned"
+        ):
+            if candidate["before"] is None:
                 raise MountRecoveryError(
                     "Pending journal X pre-state transition is invalid"
                 )
@@ -2275,8 +2401,10 @@ class MountSession:
         for plan in records:
             expected = {
                 "before",
+                "custody",
                 "destination",
                 "id",
+                "kind",
                 "label",
                 "observed_after",
                 "options",
@@ -2291,6 +2419,7 @@ class MountSession:
                 or not self._is_hex(plan["id"], 32)
                 or plan["id"] in plan_ids
                 or plan["stage"] not in _MOUNT_PLAN_STAGES
+                or plan["kind"] not in {"filesystem", "iso"}
                 or type(plan["recursive"]) is not bool
                 or not isinstance(plan["source"], str)
                 or not os.path.isabs(plan["source"])
@@ -2425,9 +2554,27 @@ class MountSession:
                 raise MountRecoveryError(
                     "Created-directory metadata is invalid"
                 )
-            path = self._validate_directory_resource_path(
-                record["path"]
+            iso_plan = next(
+                (
+                    plan
+                    for plan in mount_records
+                    if plan.get("kind") == "iso"
+                    and plan["destination"] == record["path"]
+                ),
+                None,
             )
+            if iso_plan is None:
+                path = self._validate_resource_path(record["path"])
+            else:
+                try:
+                    path = mounts.validate_iso_custody(
+                        self._request_from_plan(iso_plan)
+                    )
+                except mounts.MountEvidenceError as error:
+                    raise MountRecoveryError(
+                        "Journal ISO directory path is invalid: "
+                        f"{record['path']}"
+                    ) from error
             paths.add(path)
             if not any(
                 self._path_within(
@@ -2645,15 +2792,20 @@ class MountSession:
             not isinstance(path, str)
             or not os.path.isabs(path)
             or os.path.normpath(path) != path
-            or not self._is_iso_destination(path)
+            or not self._is_persisted_iso_destination(path)
         ):
             raise MountRecoveryError(
                 f"Journal directory path is outside custody: {path}"
             )
         try:
-            return mounts.validate_iso_mount_destination(
-                self.ctx,
-                path,
+            plan = next(
+                plan
+                for plan in self._state["mounts"]
+                if plan.get("kind") == "iso"
+                and plan["destination"] == path
+            )
+            return mounts.validate_iso_custody(
+                self._request_from_plan(plan)
             )
         except mounts.MountEvidenceError as error:
             raise MountRecoveryError(
@@ -2720,19 +2872,30 @@ class MountSession:
             )
         parent = os.path.dirname(self.runtime_dir)
         self._validate_runtime_parent_chain(parent)
-        if not os.path.lexists(parent):
-            raise MountRecoveryError(
-                "Runtime custody parent does not exist"
-            )
         if not os.path.lexists(self.runtime_dir):
-            parent_state = os.lstat(parent)
+            try:
+                parent_state = os.lstat(parent)
+            except OSError as error:
+                raise MountRecoveryError(
+                    "Runtime custody parent is unavailable"
+                ) from error
             if not stat.S_ISDIR(parent_state.st_mode):
                 raise MountRecoveryError(
                     "Runtime parent changed before leaf creation"
                 )
-            os.mkdir(self.runtime_dir, 0o700)
+            try:
+                os.mkdir(self.runtime_dir, 0o700)
+            except OSError as error:
+                raise MountRecoveryError(
+                    "Unable to create runtime custody directory"
+                ) from error
             self._fsync_directory(parent)
-        stat_result = os.lstat(self.runtime_dir)
+        try:
+            stat_result = os.lstat(self.runtime_dir)
+        except OSError as error:
+            raise MountRecoveryError(
+                "Unable to inspect runtime custody directory"
+            ) from error
         if (
             not stat.S_ISDIR(stat_result.st_mode)
             or stat.S_ISLNK(stat_result.st_mode)
@@ -2757,7 +2920,7 @@ class MountSession:
         for cursor in chain:
             try:
                 state = os.lstat(cursor)
-            except FileNotFoundError as error:
+            except OSError as error:
                 raise MountRecoveryError(
                     "Runtime custody parent chain is incomplete"
                 ) from error

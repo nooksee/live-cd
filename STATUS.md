@@ -121,19 +121,20 @@ The inspected Ubuntu 26.04 desktop ISO does not match those assumptions:
 
 The current engine therefore cannot claim modern Ubuntu media support.
 
-## Phase 1C-2 candidate evidence
+## Phase 1C-2 root-free acceptance
 
-The current candidate implements a machine-wide mount-session transaction for
-caller mounts, ISO extraction mounts, host X access, temporary artifacts, and
-operation-created directories. Recovery uses exact mountinfo identities,
-atomic journals, a private runtime lock, positive mount deltas, tokenized
-directory staging, exact parent and inode custody, and bounded cleanup.
+The accepted implementation at `62a5191` provides a machine-wide
+mount-session transaction for caller mounts, ISO extraction mounts, host X
+access, temporary artifacts, and operation-created directories. Recovery uses
+exact mountinfo identities, atomic journals, a private runtime lock, positive
+mount deltas, tokenized directory staging, exact parent and inode custody, and
+bounded cleanup.
 
 Focused mount-session and extraction-recovery tests pass `124/124` in both
 normal and core-only postures. Complete suites pass `213/213` with GUI
 dependencies and `212` with one expected GUI assertion skipped without
 PyGObject. Real root, mount, unmount, chroot, package, network, ISO, X,
-Xephyr, QEMU, and GUI operations performed during candidate acceptance remain
+Xephyr, QEMU, and GUI operations performed during root-free acceptance remain
 `0`.
 
 The directory-recovery correction covers initial interruption after private
@@ -145,9 +146,11 @@ are normalized only for inspection, with the original mode restored when
 foreign content is found. Unproved permission bits and foreign location,
 content, mount, or identity evidence remain fail-closed.
 
-This is candidate evidence. Independent Claude acceptance has not yet been
-granted. The detailed record is
-`docs/reviews/phase1c2-mount-session-acceptance.md`.
+Claude Devens independently reviewed a physically read-only `62a5191`
+checkout and returned `ACCEPT`, with `0` blocking, `0` major, `0` minor, and
+`4` informational findings. The acceptance certifies the root-free recovery
+design and evidence. Real privileged acceptance remains pending. The detailed
+record is `docs/reviews/phase1c2-mount-session-acceptance.md`.
 
 ## Immediate blockers
 
@@ -155,8 +158,8 @@ granted. The detailed record is
    command construction.
 2. Extract and rebuild remain hard-wired to the older single-SquashFS and
    `isolinux` media layout.
-3. Caller-level mount and host X-access safety has root-free candidate
-   evidence but has not completed real privileged acceptance.
+3. Caller-level mount and host X-access safety has completed root-free
+   acceptance but has not completed real privileged acceptance.
 4. Operational privilege handling still reflects the older root-process
    model.
 5. The GUI has not completed real-desktop product acceptance.

@@ -1,19 +1,23 @@
-# Phase 1C-2 mount-session candidate evidence
+# Phase 1C-2 mount-session root-free acceptance
 
 - Date: 2026-07-28
-- Correction parent: `5485ff2e9280097285bef84fcc7c4ae0a23fa5d4`
+- Accepted candidate: `62a5191d748f483f004060c916cdc4feede83b34`
+- Stack base: `472a099730cc828fdcd1039a3bdc9d92d82e44cb`
+- Final correction chain: `5485ff2` → `8fc7582` → `62a5191`
 - Authority: isolated Jacob Codex correction lane with George Prime final
   audit correction
-- Independent Claude acceptance: not yet granted
+- Independent Claude acceptance: granted at `62a5191`
 
 ## Scope
 
-This candidate governs caller mounts, extraction ISO mounts, host X access,
-temporary staging artifacts, operation-created directories, and recovery
-metadata through one machine-wide operation lock.
+This accepted root-free boundary governs caller mounts, extraction ISO
+mounts, host X access, temporary staging artifacts, operation-created
+directories, and recovery metadata through one machine-wide operation lock.
 
-The correction changes exactly one product module, one test module, and two
-control documents. Production remained read-only.
+The accepted Phase 1C-2 stack changes `19` tracked paths. The final
+directory-recovery correction changes exactly one product module, one test
+module, and two control documents. Production remained read-only until
+independent acceptance.
 
 ## Corrected findings
 
@@ -94,6 +98,34 @@ remain rejected.
 - Runtime custody remains outside the work tree with mode and ownership
   checks.
 
+## Independent acceptance
+
+Claude Devens inspected a physically read-only checkout of `62a5191` and
+returned `VERDICT: ACCEPT`. The review found `0` blocking, `0` major, `0`
+minor, and `4` informational findings. It confirmed that:
+
+- all four defects from the prior rejection are resolved;
+- the pre-rename directory-removal retry path is recoverable;
+- owner-inaccessible private staging mode `0200` is handled safely;
+- B1, B2, B4, B5, and F4 through F8 remain intact;
+- fail-closed evidence preservation and the trusted-single-writer boundary
+  remain explicit.
+
+The informational findings are retained for later privileged acceptance:
+
+- parent-directory fsync does not itself guarantee child-mode metadata
+  durability, but both possible durable modes are recoverable;
+- a crash before restoration can leave a foreign nonempty staging directory
+  at the normalized mode, while content remains untouched and adoption remains
+  rejected;
+- the `PermissionError` normalization branch requires confirmation under a
+  real root process;
+- inferred-recovery delta ordering remains unconstrained while duplicates and
+  wrong-order cleanup remain fail-closed.
+
+Claude modified files `0`, ran tests `0`, performed Git mutations `0`, invoked
+real-operation categories `0`, and reported protocol deviations `0`.
+
 ## Validation matrix
 
 | Gate | Result |
@@ -106,6 +138,7 @@ remain rejected.
 | Product imports | `37/37` |
 | Core-only imports | `23/23` |
 | Harmless process smokes | `4/4` |
+| Independent read-only disposition | `ACCEPT` |
 | Real privileged or graphical operations | `0` |
 
 ## Residue and limitations
@@ -126,4 +159,4 @@ represent an active lock.
 Native Python 3.8 execution remains untested because Python 3.8 is unavailable
 on the validation host. Python 3.8 grammar validation passes. Real root,
 mount, unmount, chroot, package, network, ISO, X, Xephyr, QEMU, and GUI
-acceptance operations remain outside this candidate run.
+acceptance operations remain outside this root-free acceptance.

@@ -29,10 +29,15 @@ verified byte-identical (content, checksums, and permissions including
 executable bits), to `/media/nos4r2/hard_vol2/LiveCD-Original-2015-Archive/`.
 Full git history is intact. The project (package, commands, config paths)
 was renamed from LiveCD to LiveUSB the same day, also at Kevin's explicit
-request. There is no longer a second implementation to keep in sync
-against; this repository is the sole reference.
+request. The later installed LiveCD Creator `3.13.93` package recovered from
+the 2016 ubuntuDE virtual machine is preserved under
+`legacy/live-cd-3.13.93-installed/`. Version `3.13.93` is the last known
+shipped behavioral reference, while the complete 2015 archive is the
+source-level structural reference used for the Python translation. This
+repository remains the only active product implementation.
 
-Read `STATUS.md`, `ROADMAP.md`, and `CONTRIBUTORS.md` before material work.
+Read `STATUS.md`, `ROADMAP.md`, `CONTRIBUTORS.md`, and
+`docs/reviews/phase1d-2016-reconciliation.md` before material work.
 The dated `docs/history/python-port.md` preserves the
 architecture map, including the mapping from the retired original's
 scripts/forms to their Python counterparts, and the original risk register.
@@ -55,13 +60,13 @@ remastering run as the actual acceptance test.
    port has never shipped and there is no real install in the field to
    protect.
 2. **Deliberate divergences get documented.** If you fix a bug or change
-   behaviour relative to what the original Bash/Gambas implementation did
-   (see the historical handoff §7, "Deliberate divergences from the
-   original"), record the current decision in `STATUS.md` or a current design
-   document and preserve the historical file unchanged. The original is gone
-   from the repo, but its behaviour is still the compatibility baseline for
-   on-disk state inside the target filesystem, not this tool's own config
-   path per constraint 1.
+   behaviour relative to the last shipped `3.13.93` package, record the
+   current decision in `STATUS.md` or a current design document and preserve
+   the historical evidence unchanged. The 2015 archive supplies source-level
+   structure where the later Gambas source is unavailable. Accepted Python
+   safety behavior outranks unsafe legacy mechanics. Version `3.13.93`
+   remains the behavioral compatibility baseline for on-disk state inside
+   the target filesystem, not this tool's own config path per constraint 1.
 
 ## Environment facts
 
@@ -86,5 +91,7 @@ sudo bin/live-usb -e     # extract   -r rebuild   -c chroot   -t clean
 bin/live-usb-gui
 ```
 
-There is no test suite yet. Adding one is the single highest-value
-contribution and the first implementation objective in `ROADMAP.md`.
+The tracked test suite currently contains `9` modules. The accepted
+root-free baseline passes `213/213` tests with GUI support and `212` tests
+with one expected GUI assertion skipped without PyGObject. Real privileged
+and end-to-end acceptance remains pending.

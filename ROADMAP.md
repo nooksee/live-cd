@@ -1,6 +1,6 @@
 # LiveUSB Creator roadmap
 
-- Updated: 2026-07-26
+- Updated: 2026-07-28
 - Current phase: Phase 1 — recover the legacy factory
 - Current version: `0.1.0.dev0`
 
@@ -82,23 +82,39 @@ Accepted Phase 1C-1 baseline:
 - actual child-process crash and live-lock proofs: `2/2`;
 - post-recovery residue categories: `0/0/0/0/0/0`.
 
+Accepted Phase 1C-2 baseline:
+
+- accepted implementation commit: `62a5191`;
+- focused mount-session and extraction-recovery tests: `124/124`;
+- complete GUI-enabled suite: `213/213`;
+- core-only suite: `212` pass and `1` expected GUI skip;
+- real privileged operation categories exercised: `0`;
+- blocking, major, and minor review findings: `0/0/0`.
+
+Accepted recovered-reference baseline:
+
+- installed version: `3.13.93-0ubuntu3`;
+- preserved package/reference files: `57`;
+- SHA-256 checks: `57/57`;
+- 2015-to-2016 backend delta: `13` changed, `2` identical, `5` added;
+- added actions: `theme`, `plymouth`, `ubiquity`, `usb`, and `burn`;
+- accepted review:
+  `docs/reviews/phase1d-2016-reconciliation.md`.
+
 Work:
 
-1. Extend the accepted characterization baseline beyond configuration
-   parsing, CLI dispatch, and checksum generation to media recognition,
-   command construction, and injected failure behavior.
-2. Isolate subprocess execution enough to inspect and test command plans.
-3. Add dependency, privilege, disk-space, media-layout, and workspace
-   preflight reporting.
-4. Complete Wave 1C-2 of the accepted transaction contract from
-   `docs/reviews/phase1b-transaction-safety.md`: caller-level mounts and X
-   access. Wave 1C-1 chroot-internal state is accepted in
-   `docs/reviews/phase1c1-chroot-transaction-acceptance.md`.
-5. Correct remaining launch and argument-handling failures. Full argument
-   prevalidation is complete.
-6. Execute the legacy extract and no-change rebuild in a bounded workspace.
-7. Validate ISO structure, preserve the input byte-identically, and boot the
+1. Complete Phase 1D root-free characterization and correction of the legacy
+   final-image path: one preplanned SquashFS command, final `isohybrid`
+   mutation, read-only sealing, and final-byte SHA-256 evidence.
+2. Add dependency, privilege, disk-space, media-layout, and workspace
+   preflight reporting for the accepted legacy-media profile.
+3. Install or otherwise provide the missing `isohybrid` dependency only
+   after root-free implementation and review acceptance.
+4. Execute the legacy extract and no-change rebuild in a bounded workspace.
+5. Validate ISO structure, preserve the input byte-identically, and boot the
    output in QEMU.
+6. Reconcile the recovered 2016 customization actions after the first
+   successful factory cycle. Device-writer launchers remain last.
 
 Acceptance:
 

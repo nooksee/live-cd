@@ -121,6 +121,36 @@ The inspected Ubuntu 26.04 desktop ISO does not match those assumptions:
 
 The current engine therefore cannot claim modern Ubuntu media support.
 
+## Recovered 2016 behavioral reference
+
+The installed LiveCD Creator `3.13.93-0ubuntu3` package recovered from the
+2016 ubuntuDE virtual machine is now preserved as immutable historical
+evidence under `legacy/live-cd-3.13.93-installed/`.
+
+Validation passes:
+
+- captured package/reference files: `57/57`;
+- preservation SHA-256 checks: `57/57`;
+- package MD5 checks: `17/17`;
+- conffiles: `35/35`;
+- installed package-list entries: `108/108`.
+
+An independent 2015-to-2016 comparison reproduces `13` changed overlapping
+files, `2` byte-identical files, and `5` added action files. The recovered
+build also adds final `isohybrid` mutation and an ISO SHA-256 sidecar. Those
+two final-image behaviors are missing from the current Python rebuild path.
+
+The accepted authority model is:
+
+- version `3.13.93` is the last known shipped behavioral reference;
+- the complete 2015 source is the source-level structural reference;
+- accepted Python transaction and recovery behavior is current safety
+  authority.
+
+The evidence, classifications, deferrals, and corrected implementation order
+are recorded in
+`docs/reviews/phase1d-2016-reconciliation.md`.
+
 ## Phase 1C-2 root-free acceptance
 
 The accepted implementation at `62a5191` provides a machine-wide
@@ -158,18 +188,24 @@ record is `docs/reviews/phase1c2-mount-session-acceptance.md`.
    command construction.
 2. Extract and rebuild remain hard-wired to the older single-SquashFS and
    `isolinux` media layout.
-3. Caller-level mount and host X-access safety has completed root-free
+3. The legacy final-image path does not yet apply `isohybrid`, publish a
+   SHA-256 sidecar, or select compression capability before starting the
+   SquashFS build.
+4. The current host does not have the `isohybrid` command required for the
+   recovered legacy finalization path.
+5. Caller-level mount and host X-access safety has completed root-free
    acceptance but has not completed real privileged acceptance.
-4. Operational privilege handling still reflects the older root-process
+6. Operational privilege handling still reflects the older root-process
    model.
-5. The GUI has not completed real-desktop product acceptance.
+7. The GUI has not completed real-desktop product acceptance.
 
 ## Current acceptance gate
 
 Phase 1 is the only active product gate:
 
 > Extract the known-good 2015 `ubuntuDE` ISO, apply no customization, rebuild
-> it with the Python implementation, and boot the result successfully in
+> it with the Python implementation, finalize and hash the output according
+> to the accepted legacy-media contract, and boot the result successfully in
 > QEMU while leaving residual mounts, locks, and blocked files at `0`.
 
 See `ROADMAP.md` for scope, team lanes, exclusions, and later phases. See
@@ -180,4 +216,6 @@ accepted behavioral comparison and checksum-comparison caveat. See
 `docs/reviews/phase1b-transaction-safety.md` for the accepted cleanup
 contract and implementation boundaries. See
 `docs/reviews/phase1c1-chroot-transaction-acceptance.md` for the accepted
-chroot-internal transaction evidence and remaining Wave 1C-2 boundary.
+chroot-internal transaction evidence and remaining Wave 1C-2 boundary. See
+`docs/reviews/phase1d-2016-reconciliation.md` for the recovered 2016
+behavioral authority, accepted delta ledger, and next root-free gate.

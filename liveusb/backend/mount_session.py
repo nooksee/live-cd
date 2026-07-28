@@ -108,6 +108,9 @@ class MountSession:
         self.fs_root = os.path.realpath(
             os.path.abspath(ctx.fs_dir)
         )
+        self.mount_root = os.path.realpath(
+            os.path.abspath(ctx.mount_dir)
+        )
         self.runtime_dir = os.path.abspath(ctx.runtime_dir)
         self.lock_path = os.path.join(
             self.runtime_dir,
@@ -225,6 +228,25 @@ class MountSession:
         return tuple(
             self._acquire_mount(request)
             for request in mounts.dbus_mount_requests(self.ctx)
+        )
+
+    def mount_iso(self):
+        self._require_active_session()
+        mounts.validate_extract_layout(self.ctx)
+        mount_root = os.path.abspath(self.ctx.mount_dir)
+        if not os.path.isdir(mount_root):
+            raise MountAcquisitionError(
+                "ISO mount staging root does not exist"
+            )
+        destination = os.path.join(
+            mount_root,
+            f"liveusb-iso-{self.token}-{uuid.uuid4().hex}",
+        )
+        return self._acquire_mount(
+            mounts.iso_mount_request(
+                self.ctx,
+                destination,
+            )
         )
 
     def allow_local_x_access(self):
@@ -511,10 +533,7 @@ class MountSession:
     def _acquire_mount(self, request):
         self._require_active_session()
         try:
-            destination = mounts.validate_mount_destination(
-                self.ctx,
-                request.destination,
-            )
+            destination = self._validate_mount_destination(request)
         except Exception as error:
             raise MountAcquisitionError(
                 f"Invalid mount destination: {request.destination}"
@@ -586,7 +605,7 @@ class MountSession:
             )
 
         self._ensure_directory(destination)
-        mounts.validate_mount_destination(self.ctx, destination)
+        self._validate_mount_destination(request)
         before_command = mounts.mounts_under(
             self._read_mounts(),
             destination,
@@ -607,10 +626,7 @@ class MountSession:
 
         plan["stage"] = "command-started"
         self._persist_journal()
-        mounts.validate_mount_destination(
-            self.ctx,
-            destination,
-        )
+        self._validate_mount_destination(request)
         command_succeeded = False
         command_error = None
         try:
@@ -888,7 +904,7 @@ class MountSession:
         directory_records,
         active_mount_points,
     ):
-        self._validate_resource_path(record["path"])
+        self._validate_directory_resource_path(record["path"])
         parent = os.path.dirname(record["path"])
         if (
             parent not in active_mount_points
@@ -1294,10 +1310,21 @@ class MountSession:
         return tuple(active)
 
     def _ensure_directory(self, destination):
-        missing = mounts.missing_directory_paths(
-            self.ctx,
-            destination,
-        )
+        if self._is_iso_destination(destination):
+            mounts.validate_iso_mount_destination(
+                self.ctx,
+                destination,
+            )
+            missing = (
+                (destination,)
+                if not os.path.lexists(destination)
+                else ()
+            )
+        else:
+            missing = mounts.missing_directory_paths(
+                self.ctx,
+                destination,
+            )
         for path in missing:
             parent = os.path.dirname(path)
             record = {
@@ -1308,7 +1335,13 @@ class MountSession:
             }
             self._state["directories"].append(record)
             self._persist_journal()
-            mounts.validate_mount_destination(self.ctx, path)
+            if self._is_iso_destination(path):
+                mounts.validate_iso_mount_destination(
+                    self.ctx,
+                    path,
+                )
+            else:
+                mounts.validate_mount_destination(self.ctx, path)
             if not mounts.directory_identity_matches(
                 parent,
                 record["parent_identity"],
@@ -1440,6 +1473,39 @@ class MountSession:
             label=plan["label"],
             options=tuple(plan["options"]),
             recursive=plan["recursive"],
+        )
+
+    def _validate_mount_destination(self, request):
+        if mounts.is_authorized_iso_request(self.ctx, request):
+            return mounts.validate_iso_mount_destination(
+                self.ctx,
+                request.destination,
+            )
+        return mounts.validate_mount_destination(
+            self.ctx,
+            request.destination,
+        )
+
+    def _is_iso_destination(self, destination):
+        return (
+            os.path.dirname(destination)
+            == os.path.abspath(self.ctx.mount_dir)
+            and self._path_within(
+                self.mount_root,
+                destination,
+                include_root=False,
+            )
+        )
+
+    def _request_is_authorized(self, request):
+        if mounts.is_authorized_iso_request(self.ctx, request):
+            return True
+        return any(
+            self._request_signature(request)
+            == self._request_signature(candidate)
+            for candidate in mounts.authorized_mount_requests(
+                self.ctx
+            )
         )
 
     @staticmethod
@@ -1666,18 +1732,22 @@ class MountSession:
             raise MountRecoveryError(
                 "Pending journal evidence is multiple or ambiguous"
             )
-        if not os.path.lexists(self.journal_path):
-            raise MountRecoveryError(
-                "Pending journal lacks a committed predecessor"
-            )
-        current, current_raw = self._read_journal_with_raw()
-        self._validate_state(current)
         pending_path = pending_paths[0]
         candidate, _candidate_raw = self._read_metadata_file(
             pending_path,
             "Pending journal",
         )
         self._validate_state(candidate)
+        if not os.path.lexists(self.journal_path):
+            self._validate_initial_pending_journal(
+                candidate,
+                pending_path,
+            )
+            os.replace(pending_path, self.journal_path)
+            self._fsync_directory(self.runtime_dir)
+            return
+        current, current_raw = self._read_journal_with_raw()
+        self._validate_state(current)
         self._validate_pending_transition(
             current,
             current_raw,
@@ -1687,14 +1757,34 @@ class MountSession:
         os.replace(pending_path, self.journal_path)
         self._fsync_directory(self.runtime_dir)
 
-    def _validate_pending_transition(
+    def _validate_initial_pending_journal(
         self,
-        current,
-        current_raw,
         candidate,
         pending_path,
     ):
-        token = current["owner"]["token"]
+        self._validate_pending_filename(
+            candidate["owner"]["token"],
+            pending_path,
+        )
+        if (
+            candidate["sequence"] != 1
+            or candidate["previous_sha256"] is not None
+            or candidate["phase"] != "active"
+            or candidate["mounts"]
+            or candidate["directories"]
+            or candidate["artifacts"]
+            or candidate["x"]
+            != {
+                "before": None,
+                "mutation": False,
+                "stage": "unexamined",
+            }
+        ):
+            raise MountRecoveryError(
+                "Predecessorless pending journal is not an initial state"
+            )
+
+    def _validate_pending_filename(self, token, pending_path):
         prefix = (
             os.path.basename(self.pending_prefix)
             + token
@@ -1706,6 +1796,18 @@ class MountSession:
             raise MountRecoveryError(
                 "Pending journal filename is not in transaction custody"
             )
+
+    def _validate_pending_transition(
+        self,
+        current,
+        current_raw,
+        candidate,
+        pending_path,
+    ):
+        self._validate_pending_filename(
+            current["owner"]["token"],
+            pending_path,
+        )
         expected_previous = hashlib.sha256(
             current_raw
         ).hexdigest()
@@ -1744,9 +1846,48 @@ class MountSession:
             raise MountRecoveryError(
                 "Pending journal appends multiple resources"
             )
-        for previous, next_record in zip(
+        self._validate_pending_mount_transitions(
             current["mounts"],
             candidate["mounts"],
+        )
+        self._validate_pending_directory_transitions(
+            current["directories"],
+            candidate["directories"],
+        )
+        self._validate_pending_artifact_transitions(
+            current["artifacts"],
+            candidate["artifacts"],
+        )
+        self._validate_pending_x_transition(
+            current["x"],
+            candidate["x"],
+        )
+        if added and (
+            candidate["phase"] != current["phase"]
+            or candidate["x"] != current["x"]
+            or any(
+                candidate[field][
+                    :len(current[field])
+                ] != current[field]
+                for field in (
+                    "mounts",
+                    "directories",
+                    "artifacts",
+                )
+            )
+        ):
+            raise MountRecoveryError(
+                "Pending journal append changes existing state"
+            )
+
+    def _validate_pending_mount_transitions(
+        self,
+        current_records,
+        candidate_records,
+    ):
+        for previous, next_record in zip(
+            current_records,
+            candidate_records,
         ):
             stable = (
                 "before",
@@ -1764,9 +1905,134 @@ class MountSession:
                 raise MountRecoveryError(
                     "Pending journal changes immutable mount evidence"
                 )
+            allowed = {
+                "planned": {
+                    "planned",
+                    "command-started",
+                    "failed",
+                    "ambiguous",
+                },
+                "command-started": {
+                    "command-started",
+                    "owned",
+                    "failed",
+                    "ambiguous",
+                },
+                "owned": {"owned"},
+                "already-present": {"already-present"},
+                "failed": {"failed"},
+                "ambiguous": {"ambiguous", "failed"},
+            }
+            if next_record["stage"] not in allowed[previous["stage"]]:
+                raise MountRecoveryError(
+                    "Pending journal mount stage transition is invalid"
+                )
+            observation_may_change = (
+                previous["stage"] == "planned"
+                and next_record["stage"] == "ambiguous"
+            ) or (
+                previous["stage"] == "command-started"
+                and next_record["stage"]
+                in {"owned", "failed", "ambiguous"}
+            )
+            if (
+                not observation_may_change
+                and next_record["observed_after"]
+                != previous["observed_after"]
+            ):
+                raise MountRecoveryError(
+                    "Pending journal mount observation transition "
+                    "is invalid"
+                )
+            self._validate_pending_owned_transitions(
+                previous,
+                next_record,
+            )
+        for appended in candidate_records[len(current_records):]:
+            if (
+                appended["stage"] not in {
+                    "planned",
+                    "already-present",
+                }
+                or appended["owned"]
+                or (
+                    appended["stage"] == "planned"
+                    and appended["observed_after"]
+                )
+                or (
+                    appended["stage"] == "already-present"
+                    and appended["observed_after"]
+                    != appended["before"]
+                )
+            ):
+                raise MountRecoveryError(
+                    "Pending journal appended mount is not initial"
+                )
+
+    def _validate_pending_owned_transitions(
+        self,
+        previous,
+        candidate,
+    ):
+        previous_owned = previous["owned"]
+        next_owned = candidate["owned"]
+        if previous["stage"] == "command-started":
+            if candidate["stage"] == "owned":
+                if not next_owned or any(
+                    owned["stage"] != "owned"
+                    or owned["inferred"]
+                    for owned in next_owned
+                ):
+                    raise MountRecoveryError(
+                        "Pending journal initial mount ownership "
+                        "is invalid"
+                    )
+            elif next_owned:
+                raise MountRecoveryError(
+                    "Pending journal adopts mount ownership"
+                )
+            return
+        if previous["stage"] != "owned":
+            if next_owned != previous_owned:
+                raise MountRecoveryError(
+                    "Pending journal changes unowned mount identities"
+                )
+            return
+        if len(next_owned) < len(previous_owned):
+            raise MountRecoveryError(
+                "Pending journal removes owned mount identities"
+            )
+        allowed = {
+            "owned": {"owned", "unmounting"},
+            "unmounting": {"unmounting", "removed"},
+            "removed": {"removed"},
+        }
+        for old, new in zip(previous_owned, next_owned):
+            if (
+                old["identity"] != new["identity"]
+                or old["inferred"] != new["inferred"]
+                or new["stage"] not in allowed[old["stage"]]
+            ):
+                raise MountRecoveryError(
+                    "Pending journal owned-mount transition is invalid"
+                )
+        for appended in next_owned[len(previous_owned):]:
+            if (
+                not appended["inferred"]
+                or appended["stage"] != "owned"
+            ):
+                raise MountRecoveryError(
+                    "Pending journal inferred mount is invalid"
+                )
+
+    def _validate_pending_directory_transitions(
+        self,
+        current_records,
+        candidate_records,
+    ):
         for previous, next_record in zip(
-            current["directories"],
-            candidate["directories"],
+            current_records,
+            candidate_records,
         ):
             if (
                 previous["path"] != next_record["path"]
@@ -1776,9 +2042,53 @@ class MountSession:
                 raise MountRecoveryError(
                     "Pending journal changes directory custody"
                 )
+            allowed = {
+                "planned": {"planned", "created", "removed"},
+                "created": {"created", "removing"},
+                "removing": {"removing", "removed"},
+                "removed": {"removed"},
+            }
+            if next_record["stage"] not in allowed[previous["stage"]]:
+                raise MountRecoveryError(
+                    "Pending journal directory transition is invalid"
+                )
+            if previous["stage"] == "planned":
+                if (
+                    next_record["stage"] == "created"
+                    and (
+                        previous["identity"] is not None
+                        or next_record["identity"] is None
+                    )
+                ) or (
+                    next_record["stage"] != "created"
+                    and next_record["identity"]
+                    != previous["identity"]
+                ):
+                    raise MountRecoveryError(
+                        "Pending journal directory identity transition "
+                        "is invalid"
+                    )
+            elif next_record["identity"] != previous["identity"]:
+                raise MountRecoveryError(
+                    "Pending journal changes directory identity"
+                )
+        for appended in candidate_records[len(current_records):]:
+            if (
+                appended["stage"] != "planned"
+                or appended["identity"] is not None
+            ):
+                raise MountRecoveryError(
+                    "Pending journal appended directory is not initial"
+                )
+
+    def _validate_pending_artifact_transitions(
+        self,
+        current_records,
+        candidate_records,
+    ):
         for previous, next_record in zip(
-            current["artifacts"],
-            candidate["artifacts"],
+            current_records,
+            candidate_records,
         ):
             stable = ("expected", "path", "purpose")
             if any(
@@ -1788,10 +2098,98 @@ class MountSession:
                 raise MountRecoveryError(
                     "Pending journal changes artifact custody"
                 )
-        if (
-            current["x"]["before"] is not None
-            and candidate["x"]["before"] != current["x"]["before"]
-        ):
+            allowed = {
+                "planned": {"planned", "writing", "removed"},
+                "writing": {
+                    "writing",
+                    "active",
+                    "removing",
+                },
+                "active": {"active", "removing"},
+                "removing": {"removing", "removed"},
+                "removed": {"removed"},
+            }
+            if next_record["stage"] not in allowed[previous["stage"]]:
+                raise MountRecoveryError(
+                    "Pending journal artifact transition is invalid"
+                )
+            if previous["stage"] == "planned":
+                if (
+                    next_record["stage"] == "writing"
+                    and (
+                        previous["identity"] is not None
+                        or next_record["identity"] is None
+                    )
+                ) or (
+                    next_record["stage"] != "writing"
+                    and next_record["identity"]
+                    != previous["identity"]
+                ):
+                    raise MountRecoveryError(
+                        "Pending journal artifact identity transition "
+                        "is invalid"
+                    )
+            elif (
+                previous["stage"] == "writing"
+                and next_record["stage"] in {"active", "removing"}
+            ):
+                if not self._same_file_node(
+                    previous["identity"],
+                    next_record["identity"],
+                ):
+                    raise MountRecoveryError(
+                        "Pending journal artifact inode transition "
+                        "is invalid"
+                    )
+            elif next_record["identity"] != previous["identity"]:
+                raise MountRecoveryError(
+                    "Pending journal changes artifact identity"
+                )
+        for appended in candidate_records[len(current_records):]:
+            if (
+                appended["stage"] != "planned"
+                or appended["identity"] is not None
+            ):
+                raise MountRecoveryError(
+                    "Pending journal appended artifact is not initial"
+                )
+
+    def _validate_pending_x_transition(self, previous, candidate):
+        allowed = {
+            "unexamined": {
+                "unexamined",
+                "no-change",
+                "grant-planned",
+            },
+            "no-change": {"no-change"},
+            "grant-planned": {
+                "grant-planned",
+                "owned",
+                "failed",
+            },
+            "owned": {"owned", "revoking"},
+            "revoking": {"revoking", "restored"},
+            "restored": {"restored"},
+            "failed": {"failed"},
+        }
+        if candidate["stage"] not in allowed[previous["stage"]]:
+            raise MountRecoveryError(
+                "Pending journal X stage transition is invalid"
+            )
+        if previous["stage"] == "unexamined":
+            if candidate["stage"] == "unexamined":
+                if candidate != previous:
+                    raise MountRecoveryError(
+                        "Pending journal changes untouched X state"
+                    )
+            elif (
+                previous["before"] is not None
+                or candidate["before"] is None
+            ):
+                raise MountRecoveryError(
+                    "Pending journal X pre-state transition is invalid"
+                )
+        elif candidate["before"] != previous["before"]:
             raise MountRecoveryError(
                 "Pending journal changes X pre-state"
             )
@@ -1913,16 +2311,16 @@ class MountSession:
                     "Mount plan metadata is invalid"
                 )
             plan_ids.add(plan["id"])
-            destination = self._validate_resource_path(
-                plan["destination"]
-            )
             request = self._request_from_plan(plan)
-            allowed = mounts.authorized_mount_requests(self.ctx)
-            if not any(
-                self._request_signature(request)
-                == self._request_signature(candidate)
-                for candidate in allowed
-            ):
+            try:
+                destination = self._validate_mount_destination(
+                    request
+                )
+            except mounts.MountEvidenceError as error:
+                raise MountRecoveryError(
+                    "Mount plan destination is invalid"
+                ) from error
+            if not self._request_is_authorized(request):
                 raise MountRecoveryError(
                     "Mount plan is outside the authorized plan set"
                 )
@@ -2027,7 +2425,9 @@ class MountSession:
                 raise MountRecoveryError(
                     "Created-directory metadata is invalid"
                 )
-            path = self._validate_resource_path(record["path"])
+            path = self._validate_directory_resource_path(
+                record["path"]
+            )
             paths.add(path)
             if not any(
                 self._path_within(
@@ -2229,6 +2629,37 @@ class MountSession:
             )
         return path
 
+    def _validate_directory_resource_path(self, path):
+        if (
+            isinstance(path, str)
+            and os.path.isabs(path)
+            and os.path.normpath(path) == path
+            and self._path_within(
+                self.fs_root,
+                path,
+                include_root=False,
+            )
+        ):
+            return self._validate_resource_path(path)
+        if (
+            not isinstance(path, str)
+            or not os.path.isabs(path)
+            or os.path.normpath(path) != path
+            or not self._is_iso_destination(path)
+        ):
+            raise MountRecoveryError(
+                f"Journal directory path is outside custody: {path}"
+            )
+        try:
+            return mounts.validate_iso_mount_destination(
+                self.ctx,
+                path,
+            )
+        except mounts.MountEvidenceError as error:
+            raise MountRecoveryError(
+                f"Journal ISO directory path is invalid: {path}"
+            ) from error
+
     def _acquire_runtime_lock(self):
         if self._lock_descriptor is not None:
             return
@@ -2287,35 +2718,19 @@ class MountSession:
             raise MountRecoveryError(
                 "Runtime custody path is invalid"
             )
-        components = self.runtime_dir.split(os.sep)
-        cursor = os.sep
-        missing = []
-        for component in components:
-            if not component:
-                continue
-            cursor = os.path.join(cursor, component)
-            if missing:
-                missing.append(cursor)
-                continue
-            if not os.path.lexists(cursor):
-                missing.append(cursor)
-                continue
-            state = os.lstat(cursor)
-            if (
-                not stat.S_ISDIR(state.st_mode)
-                or stat.S_ISLNK(state.st_mode)
-            ):
-                raise MountRecoveryError(
-                    "Runtime parent chain is not a literal directory chain"
-                )
-        for path in missing:
-            parent = os.path.dirname(path)
+        parent = os.path.dirname(self.runtime_dir)
+        self._validate_runtime_parent_chain(parent)
+        if not os.path.lexists(parent):
+            raise MountRecoveryError(
+                "Runtime custody parent does not exist"
+            )
+        if not os.path.lexists(self.runtime_dir):
             parent_state = os.lstat(parent)
             if not stat.S_ISDIR(parent_state.st_mode):
                 raise MountRecoveryError(
-                    "Runtime parent changed before creation"
+                    "Runtime parent changed before leaf creation"
                 )
-            os.mkdir(path, 0o700)
+            os.mkdir(self.runtime_dir, 0o700)
             self._fsync_directory(parent)
         stat_result = os.lstat(self.runtime_dir)
         if (
@@ -2329,6 +2744,39 @@ class MountSession:
             raise MountRecoveryError(
                 "Runtime custody directory is invalid"
             )
+
+    def _validate_runtime_parent_chain(self, parent):
+        components = parent.split(os.sep)
+        cursor = os.sep
+        chain = [os.sep]
+        for component in components:
+            if not component:
+                continue
+            cursor = os.path.join(cursor, component)
+            chain.append(cursor)
+        for cursor in chain:
+            try:
+                state = os.lstat(cursor)
+            except FileNotFoundError as error:
+                raise MountRecoveryError(
+                    "Runtime custody parent chain is incomplete"
+                ) from error
+            if (
+                not stat.S_ISDIR(state.st_mode)
+                or stat.S_ISLNK(state.st_mode)
+            ):
+                raise MountRecoveryError(
+                    "Runtime parent chain is not a literal directory chain"
+                )
+            mode = stat.S_IMODE(state.st_mode)
+            if (
+                mode & 0o022
+                and not (state.st_mode & stat.S_ISVTX)
+            ):
+                raise MountRecoveryError(
+                    "Runtime parent chain contains an unsafe "
+                    "writable ancestor"
+                )
 
     def _release_runtime_lock(self):
         if self._lock_descriptor is None:

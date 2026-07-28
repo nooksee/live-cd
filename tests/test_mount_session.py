@@ -26,6 +26,9 @@ def mount_identity(
     major_minor="0:1",
     root="/",
     fs_type="none",
+    mount_options=("rw",),
+    optional_fields=(),
+    super_options=("rw",),
 ):
     return mounts.MountIdentity(
         mount_id=mount_id,
@@ -33,11 +36,11 @@ def mount_identity(
         major_minor=major_minor,
         root=root,
         mount_point=os.path.abspath(path),
-        mount_options=("rw",),
-        optional_fields=(),
+        mount_options=tuple(mount_options),
+        optional_fields=tuple(optional_fields),
         fs_type=fs_type,
         source=source,
-        super_options=("rw",),
+        super_options=tuple(super_options),
     )
 
 
@@ -63,6 +66,9 @@ class FakeMountTable:
         major_minor="0:1",
         root="/",
         fs_type="none",
+        mount_options=("rw",),
+        optional_fields=(),
+        super_options=("rw",),
     ):
         identity = mount_identity(
             self.next_id,
@@ -72,6 +78,9 @@ class FakeMountTable:
             major_minor=major_minor,
             root=root,
             fs_type=fs_type,
+            mount_options=mount_options,
+            optional_fields=optional_fields,
+            super_options=super_options,
         )
         self.next_id += 1
         self.identities.append(identity)
@@ -255,6 +264,28 @@ class MountEvidenceTests(unittest.TestCase):
             ),
         )
 
+    def test_xhost_parser_rejects_status_variants_and_unknown_entries(self):
+        payloads = (
+            "prefix access control enabled, only authorized clients "
+            "can connect\n",
+            "access control enabled, only authorized clients can "
+            "connect suffix\n",
+            "access control enabled, only authorized clients can connect\n"
+            "UNKNOWN:entry\n",
+            "access control disabled, clients can connect from any host\n"
+            "access control enabled, only authorized clients can connect\n",
+            " access control enabled, only authorized clients can connect\n",
+            "access control enabled, only authorized clients can connect \n",
+            "access control enabled, only authorized clients can connect\n\n"
+            "LOCAL:\n",
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(
+                    mounts.XAccessEvidenceError
+                ):
+                    mounts.parse_xhost_output(payload)
+
     def test_xhost_runner_forces_deterministic_c_locale(self):
         completed = mock.Mock(returncode=0, stdout="")
         with mock.patch.object(
@@ -353,6 +384,93 @@ class MountSessionTests(unittest.TestCase):
 
         self.assertEqual(self.table.mount_commands, [])
         self.assertIn(wrong, self.table.identities)
+        self.assert_runtime_clean()
+
+    def test_preexisting_mount_option_mismatch_is_rejected(self):
+        mismatches = (
+            (("rw",), ("ro",)),
+            (("rw",), ("rw", "nosuid")),
+            (("rw",), ("rw", "nodev")),
+            (("rw",), ("rw", "noexec")),
+            (("rw", "relatime"), ("rw", "noatime")),
+            (("rw",), ("rw",), ("shared:10",), ()),
+        )
+        for case in mismatches:
+            with self.subTest(case=case):
+                self.table = FakeMountTable()
+                source_options, destination_options = case[:2]
+                source_propagation = (
+                    case[2] if len(case) > 2 else ()
+                )
+                destination_propagation = (
+                    case[3] if len(case) > 3 else ()
+                )
+                self.table.add(
+                    "/dev",
+                    source="/dev-device",
+                    mount_options=source_options,
+                    super_options=source_options,
+                    optional_fields=source_propagation,
+                )
+                existing = self.table.add(
+                    self.fs_dir / "dev",
+                    source="/dev-device",
+                    mount_options=destination_options,
+                    super_options=destination_options,
+                    optional_fields=destination_propagation,
+                )
+
+                with self.assertRaises(MountAcquisitionError):
+                    with self.session() as session:
+                        session.mount_sys()
+
+                self.assertEqual(self.table.mount_commands, [])
+                self.assertIn(existing, self.table.identities)
+                self.assert_runtime_clean()
+
+    def test_preexisting_mount_ignores_propagation_numeric_identity(self):
+        source = self.table.add(
+            "/dev",
+            source="/dev-device",
+            optional_fields=("shared:10",),
+        )
+        existing = self.table.add(
+            self.fs_dir / "dev",
+            source="/dev-device",
+            optional_fields=("shared:99",),
+        )
+
+        with self.session() as session:
+            acquisitions = session.mount_sys()
+
+        self.assertEqual(
+            acquisitions[0].outcome,
+            mounts.MOUNT_ALREADY_PRESENT,
+        )
+        self.assertIn(source, self.table.identities)
+        self.assertIn(existing, self.table.identities)
+        self.assert_runtime_clean()
+
+    def test_mount_access_is_not_masked_by_superblock_access(self):
+        self.table.add(
+            "/dev",
+            source="/dev-device",
+            mount_options=("rw",),
+            super_options=("ro",),
+        )
+        existing = self.table.add(
+            self.fs_dir / "dev",
+            source="/dev-device",
+            mount_options=("ro",),
+            super_options=("ro",),
+        )
+
+        with self.assertRaises(MountAcquisitionError):
+            with self.session() as session:
+                session.mount_sys()
+
+        self.assertEqual(self.table.mount_commands, [])
+        self.assertIn(existing, self.table.identities)
         self.assert_runtime_clean()
 
     def test_unproved_preexisting_mount_fails_before_mount_command(self):

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
+import shutil
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -9,11 +13,10 @@ from liveusb.backend import Context
 from liveusb.backend import clean
 from liveusb.backend import extract
 from liveusb.backend import mounts
-from liveusb.backend.mount_session import MountSession
+from liveusb.backend.mount_session import MountRecoveryError, MountSession
 
 from tests.test_mount_session import FakeMountTable
 from tests.test_mount_session import FakeXAccess
-from tests.test_mount_session import mount_identity
 
 
 class _Result:
@@ -33,10 +36,15 @@ class CleanExtractRecoveryBoundaryTests(unittest.TestCase):
                 parents=True,
                 exist_ok=True,
             )
+        self.mount_dir = self.root / "mount"
+        self.mount_dir.mkdir()
+        self.iso = self.root / "source.iso"
+        self.iso.write_bytes(b"synthetic ISO")
         self.ctx = Context(
             work_dir=str(self.work_dir),
-            mount_dir=str(self.root / "mount"),
+            mount_dir=str(self.mount_dir),
             runtime_dir=str(self.root / "runtime"),
+            iso=str(self.iso),
         )
         self.table = FakeMountTable()
         self.x_access = FakeXAccess(
@@ -86,7 +94,7 @@ class CleanExtractRecoveryBoundaryTests(unittest.TestCase):
         self.abandon_owned_mounts()
         events = []
 
-        def locked_body(_ctx):
+        def locked_body(_ctx, _session):
             self.assertEqual(self.table.identities, [])
             events.append("extract-body")
 
@@ -104,96 +112,239 @@ class CleanExtractRecoveryBoundaryTests(unittest.TestCase):
         self.assertEqual(events, ["extract-body"])
         self.assertEqual(self.table.identities, [])
 
-    def test_failed_iso_mount_with_changed_evidence_is_not_owned(self):
-        mount_point = self.root / "mount/point"
-        mount_point.mkdir(parents=True)
-        external = mount_identity(
-            90,
-            mount_point,
-            source="/external",
-        )
-        snapshots = iter(((), (external,)))
-        commands = []
+    def test_stale_exact_iso_mount_is_recovered_by_fresh_session(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        acquisition = abandoned.mount_iso()
+        mount_point = Path(acquisition.destination)
+        abandoned._release_runtime_lock()
 
-        def runner(command):
-            commands.append(tuple(command))
-            return _Result(1)
+        self.assertTrue(mount_point.is_dir())
+        self.assertEqual(len(self.table.identities), 1)
+        journal = json.loads(
+            (
+                self.root / "runtime/mount-session.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            journal["directories"][-1]["path"],
+            str(mount_point),
+        )
+        self.assertEqual(
+            journal["directories"][-1]["identity"]["ino"],
+            os.lstat(mount_point).st_ino,
+        )
+
+        with self.session():
+            pass
+
+        self.assertEqual(self.table.identities, [])
+        self.assertFalse(mount_point.exists())
+        self.assertFalse(
+            (self.root / "runtime/mount-session.json").exists()
+        )
+
+    def test_replaced_iso_mount_is_preserved_without_unmount(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        acquisition = abandoned.mount_iso()
+        self.table.replace_path(acquisition.destination)
+        abandoned._release_runtime_lock()
+        journal = self.root / "runtime/mount-session.json"
+        journal_before = journal.read_bytes()
 
         with self.assertRaisesRegex(
-            mounts.MountEvidenceError,
-            "changed unowned evidence",
-        ):
-            extract._acquire_iso_mount(
-                self.ctx,
-                str(mount_point),
-                mountinfo_reader=lambda: next(snapshots),
-                runner=runner,
-            )
-
-        self.assertEqual(len(commands), 1)
-        self.assertEqual(commands[0][0], "mount")
-
-    def test_iso_cleanup_rejects_replacement_without_unmount(self):
-        mount_point = self.root / "mount/point"
-        mount_point.mkdir(parents=True)
-        owned = mount_identity(
-            91,
-            mount_point,
-            source="/owned",
-        )
-        replacement = mount_identity(
-            92,
-            mount_point,
-            source="/replacement",
-        )
-        commands = []
-
-        with self.assertRaisesRegex(
-            mounts.MountEvidenceError,
+            MountRecoveryError,
             "identity changed",
         ):
-            extract._release_iso_mount(
-                owned,
-                mountinfo_reader=lambda: (replacement,),
-                runner=lambda command: commands.append(command),
+            self.session().__enter__()
+
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assertEqual(journal.read_bytes(), journal_before)
+        self.assertTrue(Path(acquisition.destination).exists())
+
+    def test_ambiguous_iso_mount_is_preserved_without_unmount(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        acquisition = abandoned.mount_iso()
+        self.table.add(
+            acquisition.destination,
+            source="/ambiguous",
+        )
+        abandoned._release_runtime_lock()
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "identity changed",
+        ):
+            self.session().__enter__()
+
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assertEqual(
+            len(
+                mounts.mounts_at(
+                    self.table.identities,
+                    acquisition.destination,
+                )
+            ),
+            2,
+        )
+
+    def test_overlapping_mount_and_workspace_is_rejected_first(self):
+        context = Context(
+            work_dir=str(self.work_dir),
+            mount_dir=str(self.work_dir / "mount"),
+            runtime_dir=str(self.root / "overlap-runtime"),
+            iso=str(self.iso),
+        )
+        with mock.patch.object(
+            extract.mount_session,
+            "MountSession",
+        ) as session_factory:
+            with self.assertRaisesRegex(
+                mounts.MountEvidenceError,
+                "overlap",
+            ):
+                extract.run_extract(context)
+
+        session_factory.assert_not_called()
+        self.assertFalse((self.root / "overlap-runtime").exists())
+
+    def test_invalid_image_purges_only_after_iso_cleanup(self):
+        events = []
+
+        def purge(_ctx):
+            events.append(
+                (
+                    "purge",
+                    len(self.table.identities),
+                    tuple(self.mount_dir.iterdir()),
+                )
             )
 
-        self.assertEqual(commands, [])
+        with mock.patch.object(
+            extract.mount_session,
+            "MountSession",
+            side_effect=lambda _ctx: self.session(),
+        ), mock.patch.object(
+            extract,
+            "_clean",
+            side_effect=purge,
+        ), mock.patch.object(
+            extract.chroot,
+            "create_work_dirs",
+        ):
+            with self.assertRaisesRegex(
+                Exception,
+                "not a usable image",
+            ):
+                extract.run_extract(self.ctx)
 
-    def test_iso_cleanup_removes_only_the_exact_identity(self):
-        mount_point = self.root / "mount/point"
-        mount_point.mkdir(parents=True)
-        owned = mount_identity(
-            93,
-            mount_point,
-            source="/owned",
-        )
-        unrelated = mount_identity(
-            94,
-            self.root / "unrelated",
-            source="/unrelated",
-        )
-        snapshots = iter(
-            (
-                (owned, unrelated),
-                (unrelated,),
-            )
-        )
-        commands = []
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1][1], 0)
+        self.assertEqual(events[-1][2], ())
+        self.assertEqual(len(self.table.unmount_commands), 1)
 
-        extract._release_iso_mount(
-            owned,
-            mountinfo_reader=lambda: next(snapshots),
-            runner=lambda command: (
-                commands.append(tuple(command))
-                or _Result(0)
+    def test_failed_iso_cleanup_suppresses_failure_purge(self):
+        events = []
+
+        def failing_unmount(command):
+            self.table.unmount_commands.append(list(command))
+            return False
+
+        session = MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=self.table.mount,
+            unmount_runner=failing_unmount,
+            x_query=self.x_access.query,
+            x_mutator=self.x_access.mutate,
+        )
+        with mock.patch.object(
+            extract.mount_session,
+            "MountSession",
+            return_value=session,
+        ), mock.patch.object(
+            extract,
+            "_clean",
+            side_effect=lambda _ctx: events.append("purge"),
+        ), mock.patch.object(
+            extract.chroot,
+            "create_work_dirs",
+        ):
+            with self.assertRaises(Exception):
+                extract.run_extract(self.ctx)
+
+        self.assertEqual(events, ["purge"])
+        self.assertTrue(self.table.identities)
+
+    def test_architecture_mismatch_purges_after_cleanup(self):
+        shutil.rmtree(self.work_dir)
+        events = []
+
+        def create_work_dirs(_ctx):
+            for relative in ("FileSystem", "ISO"):
+                (self.work_dir / relative).mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+
+        real_isdir = extract.os.path.isdir
+
+        def image_layout(path):
+            if "liveusb-iso-" in os.fspath(path):
+                return True
+            return real_isdir(path)
+
+        results = (
+            types.SimpleNamespace(
+                returncode=0,
+                stdout="amd64\n",
+            ),
+            types.SimpleNamespace(
+                returncode=0,
+                stdout="aarch64\n",
             ),
         )
+        with mock.patch.object(
+            extract.mount_session,
+            "MountSession",
+            side_effect=lambda _ctx: self.session(),
+        ), mock.patch.object(
+            extract,
+            "_clean",
+            side_effect=lambda _ctx: events.append(
+                ("purge", len(self.table.identities))
+            ),
+        ), mock.patch.object(
+            extract.chroot,
+            "create_work_dirs",
+            side_effect=create_work_dirs,
+        ), mock.patch.object(
+            extract.os.path,
+            "isdir",
+            side_effect=image_layout,
+        ), mock.patch.object(
+            extract.os.path,
+            "exists",
+            return_value=True,
+        ), mock.patch.object(
+            extract,
+            "run",
+            return_value=_Result(0),
+        ), mock.patch.object(
+            extract.subprocess,
+            "run",
+            side_effect=results,
+        ):
+            with self.assertRaisesRegex(
+                Exception,
+                "architecture mismatch",
+            ):
+                extract.run_extract(self.ctx)
 
-        self.assertEqual(
-            commands,
-            [("umount", "-f", str(mount_point))],
-        )
+        self.assertEqual(events, [("purge", 0)])
+        self.assertEqual(self.table.identities, [])
 
     def test_no_blind_recursive_unmount_exists_in_cleanup_sources(self):
         clean_source = Path(clean.__file__).read_text(

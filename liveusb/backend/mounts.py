@@ -23,6 +23,34 @@ UNMOUNTED = "unmounted"
 UNMOUNT_NOT_PRESENT = "not-mounted"
 UNMOUNT_FAILED = "failed"
 _MOUNT_ESCAPE = re.compile(r"\\([0-7]{3})")
+_X_STATUS_ENABLED = (
+    "access control enabled, only authorized clients can connect"
+)
+_X_STATUS_DISABLED = (
+    "access control disabled, clients can connect from any host"
+)
+_X_ENTRY = re.compile(
+    r"(?:LOCAL:|(?:SI|INET|INET6|DNET|NIS|KRB):[^\s:]+(?::[^\s:]+)*)"
+)
+_SEMANTIC_BOOLEAN_OPTIONS = (
+    "nodev",
+    "noexec",
+    "nosuid",
+)
+_SEMANTIC_ATIME_OPTIONS = (
+    "noatime",
+    "nodiratime",
+    "relatime",
+    "strictatime",
+    "lazytime",
+)
+_PROPAGATION_PREFIXES = (
+    "shared",
+    "master",
+    "propagate_from",
+)
+ISO_MOUNT_LABEL = "ISO image"
+ISO_MOUNT_OPTIONS = ("-t", "iso9660", "-o", "ro,loop")
 
 
 class MountEvidenceError(messages.LiveUSBError):
@@ -427,6 +455,97 @@ def missing_directory_paths(ctx, destination):
     return tuple(missing)
 
 
+def validate_extract_layout(ctx):
+    """Prove that mount staging and workspace trees are disjoint."""
+    work_root = os.path.realpath(os.path.abspath(ctx.work_dir))
+    mount_root = os.path.realpath(os.path.abspath(ctx.mount_dir))
+    if (
+        work_root == mount_root
+        or _path_within(work_root, mount_root, include_root=False)
+        or _path_within(mount_root, work_root, include_root=False)
+    ):
+        raise MountEvidenceError(
+            "Mount staging and workspace paths overlap"
+        )
+    return work_root, mount_root
+
+
+def iso_mount_request(ctx, destination):
+    """Build one confined ISO request for the configured image."""
+    validate_extract_layout(ctx)
+    source = os.path.abspath(ctx.iso)
+    destination = validate_iso_mount_destination(ctx, destination)
+    return MountRequest(
+        source=source,
+        destination=destination,
+        label=ISO_MOUNT_LABEL,
+        options=ISO_MOUNT_OPTIONS,
+        recursive=False,
+    )
+
+
+def validate_iso_mount_destination(ctx, destination):
+    """Validate one literal child mountpoint beneath the mount root."""
+    _work_root, mount_root = validate_extract_layout(ctx)
+    raw_mount_root = os.path.abspath(ctx.mount_dir)
+    absolute = os.path.abspath(destination)
+    if (
+        os.path.normpath(destination) != absolute
+        or os.path.dirname(absolute) != raw_mount_root
+        or not _path_within(
+            raw_mount_root,
+            absolute,
+            include_root=False,
+        )
+    ):
+        raise MountEvidenceError(
+            f"ISO mount destination escapes mount staging: {destination}"
+        )
+    if (
+        not os.path.lexists(raw_mount_root)
+        or os.path.islink(raw_mount_root)
+        or not stat.S_ISDIR(os.lstat(raw_mount_root).st_mode)
+        or os.path.realpath(raw_mount_root) != mount_root
+    ):
+        raise MountEvidenceError(
+            "ISO mount staging root is not a literal directory"
+        )
+    parent_real = os.path.realpath(os.path.dirname(absolute))
+    if parent_real != mount_root:
+        raise MountEvidenceError(
+            "ISO mount destination parent changed"
+        )
+    if os.path.lexists(absolute):
+        state = os.lstat(absolute)
+        if stat.S_ISLNK(state.st_mode) or not stat.S_ISDIR(
+            state.st_mode
+        ):
+            raise MountEvidenceError(
+                "ISO mount destination is not a literal directory"
+            )
+    return absolute
+
+
+def is_authorized_iso_request(ctx, request):
+    if (
+        request.label != ISO_MOUNT_LABEL
+        or tuple(request.options) != ISO_MOUNT_OPTIONS
+        or request.recursive
+        or request.source != os.path.abspath(ctx.iso)
+    ):
+        return False
+    try:
+        return (
+            validate_iso_mount_destination(
+                ctx,
+                request.destination,
+            )
+            == request.destination
+        )
+    except MountEvidenceError:
+        return False
+
+
 def system_mount_requests(ctx):
     return (
         MountRequest(
@@ -644,6 +763,55 @@ def _same_mounted_object(actual, source, expected_root=None):
         and actual.fs_type == source.fs_type
         and actual.source == source.source
         and actual.root == root
+        and _effective_mount_semantics(actual)
+        == _effective_mount_semantics(source)
+    )
+
+
+def _effective_mount_semantics(identity):
+    mount_options = set(identity.mount_options)
+    super_options = set(identity.super_options)
+
+    def access(options):
+        if "ro" in options:
+            return "ro"
+        if "rw" in options:
+            return "rw"
+        return "unspecified"
+
+    mount_boolean = tuple(
+        option in mount_options
+        for option in _SEMANTIC_BOOLEAN_OPTIONS
+    )
+    super_boolean = tuple(
+        option in super_options
+        for option in _SEMANTIC_BOOLEAN_OPTIONS
+    )
+    mount_atime = tuple(
+        option
+        for option in _SEMANTIC_ATIME_OPTIONS
+        if option in mount_options
+    )
+    super_atime = tuple(
+        option
+        for option in _SEMANTIC_ATIME_OPTIONS
+        if option in super_options
+    )
+    propagation = set()
+    for field in identity.optional_fields:
+        prefix = field.partition(":")[0]
+        if prefix in _PROPAGATION_PREFIXES:
+            propagation.add(prefix)
+        elif field == "unbindable":
+            propagation.add(field)
+    return (
+        access(mount_options),
+        mount_boolean,
+        mount_atime,
+        access(super_options),
+        super_boolean,
+        super_atime,
+        tuple(sorted(propagation)),
     )
 
 
@@ -765,29 +933,30 @@ def prove_preexisting_mount(request, identities):
 def parse_xhost_output(text):
     if not isinstance(text, str):
         raise XAccessEvidenceError("X access output is invalid")
-    lines = tuple(
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
-    )
-    enabled_lines = tuple(
-        line
-        for line in lines
-        if line.startswith("access control enabled")
-    )
-    disabled_lines = tuple(
-        line
-        for line in lines
-        if line.startswith("access control disabled")
-    )
-    if len(enabled_lines) + len(disabled_lines) != 1:
+    lines = tuple(text.splitlines())
+    if any(not line or line != line.strip() for line in lines):
+        raise XAccessEvidenceError(
+            "X access-control output formatting is invalid"
+        )
+    if not lines or lines[0] not in {
+        _X_STATUS_ENABLED,
+        _X_STATUS_DISABLED,
+    }:
         raise XAccessEvidenceError(
             "X access-control state is unparsable"
         )
-    enabled = bool(enabled_lines)
+    if any(
+        line.startswith("access control ")
+        or _X_ENTRY.fullmatch(line) is None
+        for line in lines[1:]
+    ):
+        raise XAccessEvidenceError(
+            "X access-control entry is unparsable"
+        )
+    enabled = lines[0] == _X_STATUS_ENABLED
     local_present = any(
-        line.upper() == "LOCAL:"
-        for line in lines
+        line == "LOCAL:"
+        for line in lines[1:]
     )
     return XAccessState(
         enabled=enabled,

@@ -1,6 +1,6 @@
 # LiveUSB Creator status
 
-- Updated: 2026-07-26
+- Updated: 2026-07-28
 - Current version: `0.1.0.dev0`
 - Release maturity: pre-alpha recovery baseline
 
@@ -20,13 +20,13 @@ extract → no-change rebuild → QEMU boot cycle promotes the project to
 
 ## Verified baseline
 
-- Python source files passing syntax and Python 3.8 grammar validation:
-  `42/42`.
-- Importable product modules: `36/36`.
+- Python source and test files passing syntax and Python 3.8 grammar
+  validation: `46/46`.
+- Importable product modules: `37/37`.
 - Harmless CLI process smokes returning expected statuses: `4/4`.
-- Current tracked test modules: `5`.
-- Current unit tests passing with GUI support installed: `69/69`.
-- Core-only unit tests passing without optional PyGObject: `68`, with the one
+- Current tracked test modules: `9`.
+- Current unit tests passing with GUI support installed: `208/208`.
+- Core-only unit tests passing without optional PyGObject: `207`, with the one
   GUI-specific assertion skipped.
 - Successful remaster cycles produced by the Python implementation: `0`.
 - Successful QEMU boots of Python-generated media: `0`.
@@ -121,14 +121,33 @@ The inspected Ubuntu 26.04 desktop ISO does not match those assumptions:
 
 The current engine therefore cannot claim modern Ubuntu media support.
 
+## Phase 1C-2 candidate evidence
+
+The current candidate implements a machine-wide mount-session transaction for
+caller mounts, ISO extraction mounts, host X access, temporary artifacts, and
+operation-created directories. Recovery uses exact mountinfo identities,
+atomic journals, a private runtime lock, positive mount deltas, tokenized
+directory staging, exact parent and inode custody, and bounded cleanup.
+
+Focused mount-session and extraction-recovery tests pass `119/119` in both
+normal and core-only postures. Complete suites pass `208/208` with GUI
+dependencies and `207` with one expected GUI assertion skipped without
+PyGObject. Real root, mount, unmount, chroot, package, network, ISO, X,
+Xephyr, QEMU, and GUI operations performed during candidate acceptance remain
+`0`.
+
+This is candidate evidence. Independent Claude acceptance has not yet been
+granted. The detailed record is
+`docs/reviews/phase1c2-mount-session-acceptance.md`.
+
 ## Immediate blockers
 
 1. Characterization coverage does not yet include media recognition or broad
    command construction.
 2. Extract and rebuild remain hard-wired to the older single-SquashFS and
    `isolinux` media layout.
-3. Caller-level mount cleanup and host X-access reversal are not yet governed
-   by the accepted operation-session transaction.
+3. Caller-level mount and host X-access safety has root-free candidate
+   evidence but has not completed real privileged acceptance.
 4. Operational privilege handling still reflects the older root-process
    model.
 5. The GUI has not completed real-desktop product acceptance.

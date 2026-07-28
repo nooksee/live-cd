@@ -398,3 +398,32 @@ comparison.
   Worth repointing at current releases or fetching an index.
 - **`README.md`** is the user-facing doc; this file is the
   contributor-facing one. Keep them from drifting.
+
+---
+
+## 10. Phase 1C-2 deliberate safety divergences
+
+The recovered Python implementation deliberately diverges from the 2015
+runtime mechanics where exact preservation would retain unsafe cleanup
+behavior:
+
+- ISO mountpoints are private directories with final mode `0700`.
+- ISO cleanup uses non-lazy forced unmount, `umount -f`. Other established
+  mount plans retain their separately characterized unmount behavior.
+- Mount acquisition and cleanup use a crash-durable journal, exact mountinfo
+  identities, and positive ownership deltas. Substring path matching and
+  blind recursive unmounting are not preserved.
+- Operation-created directories use journaled, tokenized sibling staging,
+  exact parent and inode custody, explicit final modes, and atomic rename.
+- Pre-existing mount equivalence compares effective access, security, atime,
+  propagation, and `nosymfollow` semantics.
+- X access parsing requires the exact C-locale status line and a known xhost
+  address family. Known families accept nonempty, whitespace-free payloads,
+  including resolved hostnames and named IPv6 zones.
+- Recovery assumes a trusted single writer cooperating through the
+  machine-wide POSIX lock. Hostile same-user descriptor replacement remains
+  outside this phase.
+- Candidate acceptance performs real root, mount, unmount, chroot, package,
+  network, ISO, X, Xephyr, QEMU, and GUI operations `0` times.
+- Python 3.8 grammar is validated, but native Python 3.8 execution remains
+  untested because that interpreter is not installed on the validation host.

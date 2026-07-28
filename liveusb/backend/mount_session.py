@@ -36,6 +36,8 @@ _MOUNT_IDENTITY_STAGES = {
 }
 _DIRECTORY_STAGES = {
     "planned",
+    "staged",
+    "rename-planned",
     "created",
     "removing",
     "removed",
@@ -535,6 +537,13 @@ class MountSession:
 
     def _acquire_mount(self, request):
         self._require_active_session()
+        if request.kind == "iso":
+            try:
+                mounts.validate_iso_acquisition(self.ctx, request)
+            except mounts.MountEvidenceError as error:
+                raise MountAcquisitionError(
+                    "ISO acquisition custody is invalid"
+                ) from error
         try:
             destination = self._validate_mount_destination(request)
         except Exception as error:
@@ -1013,38 +1022,66 @@ class MountSession:
                 )
         stage = record["stage"]
         exists = os.path.lexists(record["path"])
+        staging_exists = os.path.lexists(record["staging_path"])
         if stage == "planned":
             if exists:
-                expected_mode = (
-                    0o700
-                    if self._is_persisted_iso_destination(
-                        record["path"]
+                raise MountRecoveryError(
+                    "Planned directory final path is foreign: "
+                    f"{record['path']}"
+                )
+            if staging_exists:
+                self._validate_unrecorded_staging_directory(record)
+                os.chmod(
+                    record["staging_path"],
+                    record["desired_mode"],
+                )
+                self._fsync_directory(
+                    os.path.dirname(record["staging_path"])
+                )
+                record["staging_identity"] = mounts.node_identity(
+                    record["staging_path"]
+                )
+                record["stage"] = "staged"
+                return True
+            record["stage"] = "removed"
+            return True
+        if stage in {"staged", "rename-planned"}:
+            if staging_exists and exists:
+                raise MountRecoveryError(
+                    "Directory transaction has two live locations"
+                )
+            if staging_exists:
+                if not mounts.directory_identity_matches(
+                    record["staging_path"],
+                    record["staging_identity"],
+                ):
+                    raise MountRecoveryError(
+                        "Staging directory identity changed"
                     )
-                    else 0o755
-                )
-                current_mounts = mounts.mounts_under(
-                    self._read_mounts(),
-                    record["path"],
-                    include_root=True,
-                )
+            elif exists:
                 try:
                     identity = mounts.node_identity(record["path"])
                 except mounts.MountEvidenceError as error:
                     raise MountRecoveryError(
-                        "Planned directory end state is unproved: "
+                        "Renamed directory end state is invalid: "
                         f"{record['path']}"
                     ) from error
-                if current_mounts or identity["mode"] != expected_mode:
+                if identity != record["staging_identity"]:
                     raise MountRecoveryError(
-                        "Planned directory end state is ambiguous: "
-                        f"{record['path']}"
+                        "Renamed directory identity changed"
                     )
                 record["identity"] = identity
                 record["stage"] = "created"
                 return True
-            record["stage"] = "removed"
-            return True
+            else:
+                raise MountRecoveryError(
+                    "Staged directory disappeared before cleanup"
+                )
         if stage in {"created", "removing"}:
+            if staging_exists:
+                raise MountRecoveryError(
+                    "Created directory retained foreign staging residue"
+                )
             if not exists:
                 if stage == "removing":
                     record["stage"] = "removed"
@@ -1068,6 +1105,27 @@ class MountSession:
                 f"Removed directory was replaced: {record['path']}"
             )
         return False
+
+    def _validate_unrecorded_staging_directory(self, record):
+        if (
+            os.path.lexists(record["path"])
+            or mounts.mounts_under(
+                self._read_mounts(),
+                record["staging_path"],
+                include_root=True,
+            )
+        ):
+            raise MountRecoveryError(
+                "Unrecorded staging directory evidence is ambiguous"
+            )
+        identity = mounts.node_identity(record["staging_path"])
+        if (
+            identity["mode"] != 0o700
+            or os.listdir(record["staging_path"])
+        ):
+            raise MountRecoveryError(
+                "Unrecorded staging directory is not exact"
+            )
 
     def _preflight_artifact(self, record):
         self._validate_resource_path(record["path"])
@@ -1255,23 +1313,39 @@ class MountSession:
         )
 
     def _cleanup_directory(self, directory):
+        if directory["stage"] in {"staged", "rename-planned"}:
+            target = directory["staging_path"]
+            expected = directory["staging_identity"]
+        else:
+            target = directory["path"]
+            expected = directory["identity"]
         if directory["stage"] == "removing":
-            if not os.path.lexists(directory["path"]):
+            target = (
+                directory["staging_path"]
+                if os.path.lexists(directory["staging_path"])
+                else directory["path"]
+            )
+            expected = (
+                directory["staging_identity"]
+                if target == directory["staging_path"]
+                else directory["identity"]
+            )
+            if not os.path.lexists(target):
                 directory["stage"] = "removed"
                 self._persist_journal()
                 return
         directory["stage"] = "removing"
         self._persist_journal()
         if not mounts.directory_identity_matches(
-            directory["path"],
-            directory["identity"],
+            target,
+            expected,
         ):
             raise MountRecoveryError(
                 "Created directory identity changed before removal"
             )
-        os.rmdir(directory["path"])
+        os.rmdir(target)
         self._fsync_directory(
-            os.path.dirname(directory["path"])
+            os.path.dirname(target)
         )
         directory["stage"] = "removed"
         self._persist_journal()
@@ -1434,11 +1508,21 @@ class MountSession:
             )
         for path in missing:
             parent = os.path.dirname(path)
+            token = uuid.uuid4().hex
+            desired_mode = 0o700 if iso_request is not None else 0o755
+            staging_path = os.path.join(
+                parent,
+                "." + os.path.basename(path)
+                + ".liveusb-dir-" + token,
+            )
             record = {
+                "desired_mode": desired_mode,
                 "identity": None,
                 "parent_identity": mounts.node_identity(parent),
                 "path": path,
                 "stage": "planned",
+                "staging_identity": None,
+                "staging_path": staging_path,
             }
             self._state["directories"].append(record)
             self._persist_journal()
@@ -1453,7 +1537,21 @@ class MountSession:
                 raise MountRecoveryError(
                     f"Directory parent changed before creation: {parent}"
                 )
-            os.mkdir(path, 0o700 if iso_request is not None else 0o755)
+            os.mkdir(staging_path, 0o700)
+            os.chmod(staging_path, desired_mode)
+            self._fsync_directory(parent)
+            record["staging_identity"] = mounts.node_identity(
+                staging_path
+            )
+            record["stage"] = "staged"
+            self._persist_journal()
+            record["stage"] = "rename-planned"
+            self._persist_journal()
+            if os.path.lexists(path):
+                raise MountRecoveryError(
+                    f"Directory final path appeared before rename: {path}"
+                )
+            os.rename(staging_path, path)
             self._fsync_directory(parent)
             record["identity"] = mounts.node_identity(path)
             record["stage"] = "created"
@@ -1587,17 +1685,6 @@ class MountSession:
         return mounts.validate_mount_destination(
             self.ctx,
             request.destination,
-        )
-
-    def _is_iso_destination(self, destination):
-        return (
-            os.path.dirname(destination)
-            == os.path.abspath(self.ctx.mount_dir)
-            and self._path_within(
-                self.mount_root,
-                destination,
-                include_root=False,
-            )
         )
 
     def _is_persisted_iso_destination(self, destination):
@@ -2096,14 +2183,23 @@ class MountSession:
         next_owned = candidate["owned"]
         if previous["stage"] == "command-started":
             if candidate["stage"] == "owned":
-                if not next_owned or any(
+                if any(
                     owned["stage"] != "owned"
-                    or owned["inferred"]
                     for owned in next_owned
                 ):
                     raise MountRecoveryError(
                         "Pending journal initial mount ownership "
                         "is invalid"
+                    )
+                if any(owned["inferred"] for owned in next_owned):
+                    self._validate_inferred_recovery_delta(
+                        previous,
+                        candidate,
+                    )
+                elif not next_owned:
+                    raise MountRecoveryError(
+                        "Pending journal initial mount ownership "
+                        "is empty"
                     )
             elif next_owned:
                 raise MountRecoveryError(
@@ -2143,6 +2239,35 @@ class MountSession:
                     "Pending journal inferred mount is invalid"
                 )
 
+    def _validate_inferred_recovery_delta(self, previous, candidate):
+        before = {
+            mounts.MountIdentity.from_record(record).key
+            for record in previous["before"]
+        }
+        observed = {
+            mounts.MountIdentity.from_record(record).key
+            for record in candidate["observed_after"]
+        }
+        owned = {
+            mounts.MountIdentity.from_record(
+                record["identity"]
+            ).key
+            for record in candidate["owned"]
+        }
+        if (
+            not owned
+            or not before.issubset(observed)
+            or owned != observed - before
+            or any(
+                not record["inferred"]
+                or record["stage"] != "owned"
+                for record in candidate["owned"]
+            )
+        ):
+            raise MountRecoveryError(
+                "Pending inferred ownership is not the exact mount delta"
+            )
+
     def _validate_pending_directory_transitions(
         self,
         current_records,
@@ -2153,15 +2278,27 @@ class MountSession:
             candidate_records,
         ):
             if (
-                previous["path"] != next_record["path"]
-                or previous["parent_identity"]
-                != next_record["parent_identity"]
+                any(
+                    previous[field] != next_record[field]
+                    for field in (
+                        "desired_mode",
+                        "parent_identity",
+                        "path",
+                        "staging_path",
+                    )
+                )
             ):
                 raise MountRecoveryError(
                     "Pending journal changes directory custody"
                 )
             allowed = {
-                "planned": {"planned", "created", "removed"},
+                "planned": {"planned", "staged", "removed"},
+                "staged": {"staged", "rename-planned", "removing"},
+                "rename-planned": {
+                    "rename-planned",
+                    "created",
+                    "removing",
+                },
                 "created": {"created", "removing"},
                 "removing": {"removing", "removed"},
                 "removed": {"removed"},
@@ -2172,21 +2309,44 @@ class MountSession:
                 )
             if previous["stage"] == "planned":
                 if (
-                    next_record["stage"] == "created"
+                    next_record["stage"] == "staged"
                     and (
                         previous["identity"] is not None
-                        or next_record["identity"] is None
+                        or previous["staging_identity"] is not None
+                        or next_record["staging_identity"] is None
                     )
                 ) or (
-                    next_record["stage"] != "created"
-                    and next_record["identity"]
-                    != previous["identity"]
+                    next_record["stage"] != "staged"
+                    and (
+                        next_record["identity"] != previous["identity"]
+                        or next_record["staging_identity"]
+                        != previous["staging_identity"]
+                    )
                 ):
                     raise MountRecoveryError(
                         "Pending journal directory identity transition "
                         "is invalid"
                     )
-            elif next_record["identity"] != previous["identity"]:
+            elif (
+                previous["stage"] == "rename-planned"
+                and next_record["stage"] == "created"
+            ):
+                if (
+                    previous["identity"] is not None
+                    or next_record["identity"]
+                    != previous["staging_identity"]
+                    or next_record["staging_identity"]
+                    != previous["staging_identity"]
+                ):
+                    raise MountRecoveryError(
+                        "Pending journal renamed directory identity "
+                        "is invalid"
+                    )
+            elif (
+                next_record["identity"] != previous["identity"]
+                or next_record["staging_identity"]
+                != previous["staging_identity"]
+            ):
                 raise MountRecoveryError(
                     "Pending journal changes directory identity"
                 )
@@ -2194,6 +2354,7 @@ class MountSession:
             if (
                 appended["stage"] != "planned"
                 or appended["identity"] is not None
+                or appended["staging_identity"] is not None
             ):
                 raise MountRecoveryError(
                     "Pending journal appended directory is not initial"
@@ -2314,6 +2475,17 @@ class MountSession:
             if candidate["before"] is None:
                 raise MountRecoveryError(
                     "Pending journal X pre-state transition is invalid"
+                )
+        elif (
+            previous["stage"] == "no-change"
+            and candidate["stage"] == "no-change"
+        ):
+            if (
+                candidate["before"] is None
+                or candidate["mutation"]
+            ):
+                raise MountRecoveryError(
+                    "Pending journal X no-change refresh is invalid"
                 )
         elif candidate["before"] != previous["before"]:
             raise MountRecoveryError(
@@ -2543,13 +2715,18 @@ class MountSession:
                 not isinstance(record, dict)
                 or set(record)
                 != {
+                    "desired_mode",
                     "identity",
                     "parent_identity",
                     "path",
                     "stage",
+                    "staging_identity",
+                    "staging_path",
                 }
                 or record["stage"] not in _DIRECTORY_STAGES
                 or record["path"] in paths
+                or type(record["desired_mode"]) is not int
+                or record["desired_mode"] not in {0o700, 0o755}
             ):
                 raise MountRecoveryError(
                     "Created-directory metadata is invalid"
@@ -2576,6 +2753,27 @@ class MountSession:
                         f"{record['path']}"
                     ) from error
             paths.add(path)
+            staging_path = record["staging_path"]
+            expected_prefix = (
+                "." + os.path.basename(path) + ".liveusb-dir-"
+            )
+            suffix = (
+                os.path.basename(staging_path)[len(expected_prefix):]
+                if os.path.basename(staging_path).startswith(
+                    expected_prefix
+                )
+                else ""
+            )
+            if (
+                not isinstance(staging_path, str)
+                or not os.path.isabs(staging_path)
+                or os.path.normpath(staging_path) != staging_path
+                or os.path.dirname(staging_path) != os.path.dirname(path)
+                or not self._is_hex(suffix, 32)
+            ):
+                raise MountRecoveryError(
+                    "Staging-directory custody is invalid"
+                )
             if not any(
                 self._path_within(
                     path,
@@ -2592,9 +2790,37 @@ class MountSession:
             )
             if record["identity"] is not None:
                 self._validate_directory_identity(record["identity"])
+            if record["staging_identity"] is not None:
+                self._validate_directory_identity(
+                    record["staging_identity"]
+                )
+            if (
+                record["stage"] == "planned"
+                and (
+                    record["identity"] is not None
+                    or record["staging_identity"] is not None
+                )
+            ) or (
+                record["stage"] in {"staged", "rename-planned"}
+                and (
+                    record["identity"] is not None
+                    or record["staging_identity"] is None
+                )
+            ) or (
+                record["stage"] == "created"
+                and (
+                    record["identity"] is None
+                    or record["identity"]
+                    != record["staging_identity"]
+                )
+            ):
+                raise MountRecoveryError(
+                    "Directory transaction identity state is invalid"
+                )
             if (
                 record["stage"] in {"created", "removing"}
                 and record["identity"] is None
+                and record["staging_identity"] is None
             ):
                 raise MountRecoveryError(
                     "Active directory identity is missing"

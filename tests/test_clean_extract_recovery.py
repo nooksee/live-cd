@@ -164,13 +164,68 @@ class CleanExtractRecoveryBoundaryTests(unittest.TestCase):
         self.assertFalse(mount_point.exists())
         self.assertEqual(len(self.table.unmount_commands), 1)
 
-    def test_changed_iso_source_preserves_custody_without_unmount(self):
+    def test_replaced_iso_source_does_not_block_stale_cleanup(self):
         abandoned = self.session()
         abandoned.__enter__()
         acquisition = abandoned.mount_iso()
         abandoned._release_runtime_lock()
         self.iso.write_bytes(b"replaced ISO content")
+
+        with self.session():
+            pass
+
+        self.assertEqual(len(self.table.unmount_commands), 1)
+        self.assertFalse(Path(acquisition.destination).exists())
+
+    def test_deleted_iso_source_does_not_block_stale_cleanup(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        acquisition = abandoned.mount_iso()
+        abandoned._release_runtime_lock()
+        self.iso.unlink()
+
+        with self.session():
+            pass
+
+        self.assertEqual(len(self.table.unmount_commands), 1)
+        self.assertFalse(Path(acquisition.destination).exists())
+
+    def test_moved_iso_source_does_not_block_stale_cleanup(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        acquisition = abandoned.mount_iso()
+        abandoned._release_runtime_lock()
+        self.iso.rename(self.root / "moved.iso")
+
+        with self.session():
+            pass
+
+        self.assertEqual(len(self.table.unmount_commands), 1)
+        self.assertFalse(Path(acquisition.destination).exists())
+
+    def test_chmod_iso_source_does_not_block_stale_cleanup(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        acquisition = abandoned.mount_iso()
+        abandoned._release_runtime_lock()
+        self.iso.chmod(0o600)
+
+        with self.session():
+            pass
+
+        self.assertEqual(len(self.table.unmount_commands), 1)
+        self.assertFalse(Path(acquisition.destination).exists())
+
+    def test_corrupt_iso_source_custody_preserves_evidence(self):
+        abandoned = self.session()
+        abandoned.__enter__()
+        abandoned.mount_iso()
+        abandoned._release_runtime_lock()
         journal = self.root / "runtime/mount-session.json"
+        candidate = json.loads(journal.read_text(encoding="utf-8"))
+        candidate["mounts"][0]["custody"]["source"]["size"] = "invalid"
+        journal.write_bytes(MountSession._encode_json(candidate))
+        journal.chmod(0o600)
         before = journal.read_bytes()
 
         with self.assertRaises(MountRecoveryError):
@@ -178,7 +233,6 @@ class CleanExtractRecoveryBoundaryTests(unittest.TestCase):
 
         self.assertEqual(self.table.unmount_commands, [])
         self.assertEqual(journal.read_bytes(), before)
-        self.assertTrue(Path(acquisition.destination).exists())
 
     def test_interrupted_iso_mount_exact_delta_is_recovered(self):
         def interrupt_after_mount(command):
@@ -280,6 +334,33 @@ class CleanExtractRecoveryBoundaryTests(unittest.TestCase):
                         self.ctx,
                         str(candidate),
                     )
+
+    def test_iso_recovery_custody_rejects_noncanonical_destinations(self):
+        request = mounts.iso_mount_request(
+            self.ctx,
+            str(self.mount_dir / "candidate"),
+        )
+        invalid = (
+            str(self.mount_dir / "candidate") + os.sep,
+            str(self.mount_dir) + "/./candidate",
+            str(self.mount_dir / "candidate") + "/..",
+            str(self.mount_dir / "nested" / "candidate"),
+            str(self.root / "foreign"),
+            str(self.mount_dir),
+        )
+        for destination in invalid:
+            with self.subTest(destination=destination):
+                altered = mounts.MountRequest(
+                    source=request.source,
+                    destination=destination,
+                    label=request.label,
+                    options=request.options,
+                    recursive=request.recursive,
+                    kind=request.kind,
+                    custody=request.custody,
+                )
+                with self.assertRaises(mounts.MountEvidenceError):
+                    mounts.validate_iso_custody(altered)
 
     def test_iso_custody_rejects_replaced_mount_root(self):
         request = mounts.iso_mount_request(

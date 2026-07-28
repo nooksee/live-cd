@@ -284,7 +284,7 @@ class MountEvidenceTests(unittest.TestCase):
             "access control enabled, only authorized clients can connect\n"
             "UNKNOWN:entry\n",
             "access control enabled, only authorized clients can connect\n"
-            "INET6:not-an-address\n",
+            "INET6:\n",
             "access control disabled, clients can connect from any host\n"
             "access control enabled, only authorized clients can connect\n",
             " access control enabled, only authorized clients can connect\n",
@@ -311,6 +311,18 @@ class MountEvidenceTests(unittest.TestCase):
         environment = run_command.call_args.kwargs["env"]
         self.assertEqual(environment["LANG"], "C")
         self.assertEqual(environment["LC_ALL"], "C")
+
+    def test_xhost_parser_accepts_named_hosts_and_zones(self):
+        state = mounts.parse_xhost_output(
+            "access control enabled, only authorized clients can connect\n"
+            "INET6:localhost\n"
+            "INET6:ip6-localhost\n"
+            "INET6:fe80::1%eth0\n"
+            "INET6:not-an-address\n"
+        )
+
+        self.assertTrue(state.enabled)
+        self.assertFalse(state.local_present)
 
     def test_nosymfollow_mismatch_rejects_mount_equivalence(self):
         source = mount_identity(
@@ -907,6 +919,25 @@ class MountSessionTests(unittest.TestCase):
             str(self.fs_dir / "var"),
         )
         self.assertEqual(tuple(removed), expected)
+        self.assert_runtime_clean()
+
+    def test_generic_directory_final_mode_is_umask_independent(self):
+        shutil.rmtree(self.fs_dir / "tmp")
+        previous_umask = os.umask(0o077)
+        try:
+            session = self.session()
+            session.__enter__()
+            session._ensure_directory(str(self.fs_dir / "tmp"))
+            self.assertEqual(
+                os.stat(self.fs_dir / "tmp").st_mode & 0o777,
+                0o755,
+            )
+            session.cleanup()
+            session._release_runtime_lock()
+        finally:
+            os.umask(previous_umask)
+
+        self.assertFalse((self.fs_dir / "tmp").exists())
         self.assert_runtime_clean()
 
     def test_mounted_created_directory_identity_is_deferred(self):

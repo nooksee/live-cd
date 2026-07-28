@@ -405,11 +405,16 @@ class MountRecoveryTests(unittest.TestCase):
                 )
         self.abandon(abandoned)
 
-        self.assertTrue((self.fs_dir / "tmp").is_dir())
+        staging = Path(
+            abandoned._state["directories"][0]["staging_path"]
+        )
+        self.assertTrue(staging.is_dir())
+        self.assertFalse((self.fs_dir / "tmp").exists())
         with self.session():
             pass
 
         self.assertFalse((self.fs_dir / "tmp").exists())
+        self.assertFalse(staging.exists())
         self.assert_hard_recovery_clean()
 
     def test_corrupt_journal_is_preserved_byte_identically(self):
@@ -733,7 +738,7 @@ class MountRecoveryTests(unittest.TestCase):
         real_mkdir = os.mkdir
 
         def create_then_interrupt(path, mode):
-            real_mkdir(path, 0o700)
+            real_mkdir(path, 0o755)
             raise RuntimeError("synthetic mkdir interruption")
 
         with mock.patch.object(
@@ -748,11 +753,360 @@ class MountRecoveryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             MountRecoveryError,
-            "ambiguous",
+            "not exact",
         ):
             self.session().__enter__()
 
         self.assertEqual(self.journal_path.read_bytes(), before)
+
+    def test_interrupted_mount_inferred_pending_reconciles(self):
+        source = self.table.add("/dev", source="/dev")
+
+        def interrupt_after_mount(command):
+            destination = os.path.abspath(command[-1])
+            self.table.mount_commands.append(list(command))
+            self.table.add(
+                destination,
+                source=source.source,
+                major_minor=source.major_minor,
+                root=source.root,
+                fs_type=source.fs_type,
+                mount_options=source.mount_options,
+                super_options=source.super_options,
+            )
+            raise KeyboardInterrupt("synthetic mount interruption")
+
+        abandoned = MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=interrupt_after_mount,
+            unmount_runner=self.table.unmount,
+            x_query=self.x_access.query,
+            x_mutator=self.x_access.mutate,
+        )
+        abandoned.__enter__()
+        with self.assertRaises(KeyboardInterrupt):
+            abandoned.mount_sys()
+        self.abandon(abandoned)
+
+        recovering = self.session()
+        real_replace = mount_session.os.replace
+
+        def interrupt_inferred_pending(source_path, destination_path):
+            if (
+                recovering._state is not None
+                and recovering._state["mounts"]
+                and recovering._state["mounts"][0]["stage"] == "owned"
+                and recovering._state["mounts"][0]["owned"][0]["inferred"]
+            ):
+                raise OSError("synthetic inferred pending interruption")
+            return real_replace(source_path, destination_path)
+
+        with mock.patch.object(
+            mount_session.os,
+            "replace",
+            side_effect=interrupt_inferred_pending,
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                "inferred pending interruption",
+            ):
+                recovering.__enter__()
+
+        self.assertEqual(len(self.pending_paths()), 1)
+        with self.session():
+            pass
+
+        self.assertEqual(
+            tuple(identity.mount_point for identity in self.table.identities),
+            ("/dev",),
+        )
+        self.assertEqual(len(self.table.unmount_commands), 1)
+        self.assert_hard_recovery_clean()
+
+    def test_tampered_inferred_pending_preserves_all_evidence(self):
+        source = self.table.add("/dev", source="/dev")
+
+        def interrupt_after_mount(command):
+            destination = os.path.abspath(command[-1])
+            self.table.mount_commands.append(list(command))
+            self.table.add(
+                destination,
+                source=source.source,
+                major_minor=source.major_minor,
+                root=source.root,
+                fs_type=source.fs_type,
+                mount_options=source.mount_options,
+                super_options=source.super_options,
+            )
+            raise KeyboardInterrupt("synthetic mount interruption")
+
+        abandoned = MountSession(
+            self.ctx,
+            mountinfo_reader=self.table.reader,
+            mount_runner=interrupt_after_mount,
+            unmount_runner=self.table.unmount,
+            x_query=self.x_access.query,
+            x_mutator=self.x_access.mutate,
+        )
+        abandoned.__enter__()
+        with self.assertRaises(KeyboardInterrupt):
+            abandoned.mount_sys()
+        self.abandon(abandoned)
+
+        recovering = self.session()
+        with mock.patch.object(
+            mount_session.os,
+            "replace",
+            side_effect=OSError("synthetic pending interruption"),
+        ):
+            with self.assertRaises(OSError):
+                recovering.__enter__()
+        pending = self.pending_paths()[0]
+        candidate = json.loads(pending.read_text(encoding="utf-8"))
+        extra = dict(candidate["mounts"][0]["owned"][0])
+        extra["identity"] = source.to_record()
+        candidate["mounts"][0]["owned"].append(extra)
+        pending.write_bytes(MountSession._encode_json(candidate))
+        pending.chmod(0o600)
+        journal_before = self.journal_path.read_bytes()
+        pending_before = pending.read_bytes()
+
+        with self.assertRaises(MountRecoveryError):
+            self.session().__enter__()
+
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assertEqual(self.journal_path.read_bytes(), journal_before)
+        self.assertEqual(pending.read_bytes(), pending_before)
+
+    def test_directory_crash_after_identity_before_rename_recovers(self):
+        os.rmdir(self.fs_dir / "tmp")
+        source = self.root / "source.deb"
+        source.write_bytes(b"directory transaction")
+        abandoned = self.session()
+        abandoned.__enter__()
+        with mock.patch.object(
+            mount_session.os,
+            "rename",
+            side_effect=KeyboardInterrupt("synthetic pre-rename crash"),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                abandoned.stage_file(str(source), "deb", suffix=".deb")
+        record = abandoned._state["directories"][0]
+        staging = Path(record["staging_path"])
+        self.assertEqual(record["stage"], "rename-planned")
+        self.abandon(abandoned)
+
+        with self.session():
+            pass
+
+        self.assertFalse(staging.exists())
+        self.assertFalse((self.fs_dir / "tmp").exists())
+
+    def test_directory_crash_after_rename_before_final_persist_recovers(self):
+        os.rmdir(self.fs_dir / "tmp")
+        source = self.root / "source.deb"
+        source.write_bytes(b"directory transaction")
+        abandoned = self.session()
+        abandoned.__enter__()
+        real_rename = mount_session.os.rename
+
+        def rename_then_interrupt(source_path, destination_path):
+            real_rename(source_path, destination_path)
+            raise KeyboardInterrupt("synthetic post-rename crash")
+
+        with mock.patch.object(
+            mount_session.os,
+            "rename",
+            side_effect=rename_then_interrupt,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                abandoned.stage_file(str(source), "deb", suffix=".deb")
+        self.assertTrue((self.fs_dir / "tmp").is_dir())
+        self.abandon(abandoned)
+
+        with self.session():
+            pass
+
+        self.assertFalse((self.fs_dir / "tmp").exists())
+
+    def test_directory_crash_before_staging_mkdir_recovers(self):
+        os.rmdir(self.fs_dir / "tmp")
+        source = self.root / "source.deb"
+        source.write_bytes(b"directory transaction")
+        abandoned = self.session()
+        abandoned.__enter__()
+        with mock.patch.object(
+            mount_session.os,
+            "mkdir",
+            side_effect=KeyboardInterrupt("synthetic pre-mkdir crash"),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                abandoned.stage_file(str(source), "deb", suffix=".deb")
+        staging = Path(
+            abandoned._state["directories"][0]["staging_path"]
+        )
+        self.abandon(abandoned)
+
+        with self.session():
+            pass
+
+        self.assertFalse(staging.exists())
+        self.assertFalse((self.fs_dir / "tmp").exists())
+
+    def test_foreign_nonempty_staging_directory_is_preserved(self):
+        os.rmdir(self.fs_dir / "tmp")
+        source = self.root / "source.deb"
+        source.write_bytes(b"directory transaction")
+        abandoned = self.session()
+        abandoned.__enter__()
+        real_mkdir = mount_session.os.mkdir
+
+        def create_foreign_then_interrupt(path, mode):
+            real_mkdir(path, mode)
+            Path(path, "foreign").write_text(
+                "foreign",
+                encoding="utf-8",
+            )
+            raise KeyboardInterrupt("synthetic foreign staging")
+
+        with mock.patch.object(
+            mount_session.os,
+            "mkdir",
+            side_effect=create_foreign_then_interrupt,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                abandoned.stage_file(str(source), "deb", suffix=".deb")
+        staging = Path(
+            abandoned._state["directories"][0]["staging_path"]
+        )
+        self.abandon(abandoned)
+        before = self.journal_path.read_bytes()
+
+        with self.assertRaises(MountRecoveryError):
+            self.session().__enter__()
+
+        self.assertEqual(self.journal_path.read_bytes(), before)
+        self.assertTrue((staging / "foreign").is_file())
+
+    def test_foreign_final_directory_is_preserved(self):
+        os.rmdir(self.fs_dir / "tmp")
+        source = self.root / "source.deb"
+        source.write_bytes(b"directory transaction")
+        abandoned = self.session()
+        abandoned.__enter__()
+        with mock.patch.object(
+            mount_session.os,
+            "mkdir",
+            side_effect=KeyboardInterrupt("synthetic pre-mkdir crash"),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                abandoned.stage_file(str(source), "deb", suffix=".deb")
+        self.abandon(abandoned)
+        (self.fs_dir / "tmp").mkdir()
+        before = self.journal_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "final path is foreign",
+        ):
+            self.session().__enter__()
+
+        self.assertEqual(self.journal_path.read_bytes(), before)
+        self.assertTrue((self.fs_dir / "tmp").is_dir())
+
+    def test_staging_directory_with_extra_mount_is_preserved(self):
+        os.rmdir(self.fs_dir / "tmp")
+        source = self.root / "source.deb"
+        source.write_bytes(b"directory transaction")
+        abandoned = self.session()
+        abandoned.__enter__()
+        real_mkdir = mount_session.os.mkdir
+
+        def create_then_interrupt(path, mode):
+            real_mkdir(path, mode)
+            raise KeyboardInterrupt("synthetic staging mount window")
+
+        with mock.patch.object(
+            mount_session.os,
+            "mkdir",
+            side_effect=create_then_interrupt,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                abandoned.stage_file(str(source), "deb", suffix=".deb")
+        staging = abandoned._state["directories"][0]["staging_path"]
+        self.table.add(staging, source="/foreign")
+        self.abandon(abandoned)
+        before = self.journal_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "ambiguous",
+        ):
+            self.session().__enter__()
+
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assertEqual(self.journal_path.read_bytes(), before)
+
+    def test_replaced_staging_identity_is_preserved(self):
+        os.rmdir(self.fs_dir / "tmp")
+        source = self.root / "source.deb"
+        source.write_bytes(b"directory transaction")
+        abandoned = self.session()
+        abandoned.__enter__()
+        with mock.patch.object(
+            mount_session.os,
+            "rename",
+            side_effect=KeyboardInterrupt("synthetic pre-rename crash"),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                abandoned.stage_file(str(source), "deb", suffix=".deb")
+        staging = Path(
+            abandoned._state["directories"][0]["staging_path"]
+        )
+        moved = staging.with_name(staging.name + "-original")
+        staging.rename(moved)
+        staging.mkdir(mode=0o700)
+        self.abandon(abandoned)
+        before = self.journal_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "identity changed",
+        ):
+            self.session().__enter__()
+
+        self.assertEqual(self.journal_path.read_bytes(), before)
+        self.assertTrue(staging.is_dir())
+        self.assertTrue(moved.is_dir())
+
+    def test_interrupted_directory_cleanup_is_retryable(self):
+        os.rmdir(self.fs_dir / "tmp")
+        source = self.root / "source.deb"
+        source.write_bytes(b"directory transaction")
+        session = self.session()
+        session.__enter__()
+        session._ensure_directory(str(self.fs_dir / "tmp"))
+        real_rmdir = mount_session.os.rmdir
+
+        def remove_then_interrupt(path):
+            real_rmdir(path)
+            raise OSError("synthetic directory cleanup interruption")
+
+        with mock.patch.object(
+            mount_session.os,
+            "rmdir",
+            side_effect=remove_then_interrupt,
+        ):
+            with self.assertRaises(MountSessionCleanupError):
+                session.cleanup()
+        session._release_runtime_lock()
+
+        with self.session():
+            pass
+
+        self.assertFalse((self.fs_dir / "tmp").exists())
+        self.assert_hard_recovery_clean()
 
     def test_interrupted_mount_at_prestate_resolves_without_ownership(self):
         def interrupt_without_mount(_command):

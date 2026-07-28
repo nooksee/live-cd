@@ -648,7 +648,7 @@ def validate_iso_mount_destination(ctx, destination):
 
 
 def validate_iso_custody(request):
-    """Validate an ISO request solely from its durable custody record."""
+    """Validate durable ISO cleanup custody without reading the source."""
     custody = request.custody
     if (
         request.kind != "iso"
@@ -665,6 +665,10 @@ def validate_iso_custody(request):
         not isinstance(mount_root, str)
         or not os.path.isabs(mount_root)
         or os.path.normpath(mount_root) != mount_root
+        or not isinstance(request.destination, str)
+        or not os.path.isabs(request.destination)
+        or os.path.normpath(request.destination) != request.destination
+        or os.path.abspath(request.destination) != request.destination
         or os.path.dirname(request.destination) != mount_root
     ):
         raise MountEvidenceError("ISO mount-root custody is invalid")
@@ -683,9 +687,6 @@ def validate_iso_custody(request):
         )
     ):
         raise MountEvidenceError("ISO source custody is invalid")
-    current = iso_source_identity(request.source)
-    if current != source:
-        raise MountEvidenceError("ISO source custody changed")
     if os.path.lexists(request.destination):
         try:
             state = os.lstat(request.destination)
@@ -703,25 +704,19 @@ def validate_iso_custody(request):
     return request.destination
 
 
-def is_authorized_iso_request(ctx, request):
+def validate_iso_acquisition(ctx, request):
+    """Authorize a new ISO mount against the current validated context."""
+    validate_iso_custody(request)
     if (
-        request.label != ISO_MOUNT_LABEL
-        or tuple(request.options) != ISO_MOUNT_OPTIONS
-        or request.recursive
-        or request.source != os.path.abspath(ctx.iso)
-        or request.kind != "iso"
+        request.source != os.path.abspath(ctx.iso)
+        or request.custody["source"] != iso_source_identity(request.source)
+        or validate_iso_mount_destination(ctx, request.destination)
+        != request.destination
     ):
-        return False
-    try:
-        return (
-            validate_iso_mount_destination(
-                ctx,
-                request.destination,
-            )
-            == request.destination
+        raise MountEvidenceError(
+            "ISO acquisition source or destination changed"
         )
-    except MountEvidenceError:
-        return False
+    return request.destination
 
 
 def system_mount_requests(ctx):
@@ -1134,9 +1129,7 @@ def parse_xhost_output(text):
             or any(character.isspace() for character in payload)
         ):
             return False
-        if family == "INET6":
-            return re.fullmatch(r"[0-9A-Fa-f:.%]+", payload) is not None
-        return not payload.startswith(":") and not payload.endswith(":")
+        return True
 
     if any(
         line.startswith("access control ")

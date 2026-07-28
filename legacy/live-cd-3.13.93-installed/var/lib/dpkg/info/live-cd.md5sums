@@ -1,0 +1,17 @@
+b9fbcfa838ad4948e034a19f032cf8a8  usr/bin/live-cd
+e47a1f43badeefc575c998259583b44d  usr/bin/live-cd.sh
+3f5713be72e5cd4b3e4ffa1ff2bd0969  usr/share/applications/live-cd.desktop
+8472b6269aa0763af51b67543e7a2ef5  usr/share/doc/live-cd/changelog.Debian.gz
+b02ae38ea81b92dd6fa2b74e0c5e0555  usr/share/doc/live-cd/copyright
+2615cdb0eb0dc685d7232ce614156a40  usr/share/icons/Humanity/apps/24/live-cd.svg
+a1385fc001eab0d464bc2690580e4c8f  usr/share/icons/Humanity/apps/32/live-cd.svg
+85228d3323752895c75747a4c8a4f1cc  usr/share/icons/Humanity/apps/48/live-cd.svg
+d0c6c3e7e45d4d32baea5a01d484312c  usr/share/icons/Humanity/apps/64/live-cd.svg
+ba3adc03e99b7e7cb8c4495e2b5a589c  usr/share/icons/hicolor/24x24/apps/live-cd.png
+cbae7890ae385f1e8824d3b7b1f5a0fa  usr/share/icons/hicolor/32x32/apps/live-cd.png
+2171bc82fc9513d73817c6c9e0d378f5  usr/share/icons/hicolor/48x48/apps/live-cd.png
+e8477f35cb1a3c37f2a9901d743d23a8  usr/share/icons/hicolor/64x64/apps/live-cd.png
+febf09a9ba7bba595ec0d069ef0d1836  usr/share/live-cd/CHANGELOG
+d2ffedb94dfd847e9fd4b0a4b07add39  usr/share/menu/live-cd
+17af888a25191608d1fa969c1735e287  usr/share/pixmaps/live-cd.xpm
+a0e4103b848483be95d76158c5cbe164  var/log/live-cd.log

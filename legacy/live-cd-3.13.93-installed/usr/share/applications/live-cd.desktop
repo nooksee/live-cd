@@ -1,0 +1,13 @@
+[Desktop Entry]
+Encoding=UTF-8
+Name=LiveCD Creator
+Comment=LiveCD Creator is an advanced LiveCD customization and remastering tool.
+Exec=/usr/bin/live-cd
+Icon=live-cd
+Terminal=false
+Version=1.0
+Type=Application
+StartupNotify=true
+Categories=System;
+Categories=Application;System;Development;Gambas;IDE
+X-Unity-IconBackgroundColor=#5e9fe3

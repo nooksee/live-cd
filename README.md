@@ -40,6 +40,11 @@ route, and the
 [dated Python-port handoff](docs/history/python-port.md)
 for the original translation map and risk register.
 
+A later installed-package reference, recovered from the 2016 ubuntuDE virtual
+machine and validated against its Debian package metadata, is preserved under
+[legacy/live-cd-3.13.93-installed/](legacy/live-cd-3.13.93-installed/).
+It is a behavioral oracle, not active product source.
+
 ## Layout
 
 ```

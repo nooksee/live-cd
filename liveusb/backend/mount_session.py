@@ -16,7 +16,7 @@ from . import mounts
 from .. import messages
 
 
-_JOURNAL_VERSION = 3
+_JOURNAL_VERSION = 4
 _JOURNAL_NAME = "mount-session.json"
 _PENDING_MARKER = ".pending-"
 _LOCK_NAME = "operation.lock"
@@ -58,6 +58,42 @@ _X_STAGES = {
     "restored",
     "failed",
 }
+_EXTERNAL_PHASES = {
+    "building",
+    "sealed",
+    "ready",
+    "publishing",
+    "published",
+    "complete",
+    "discarded",
+}
+_EXTERNAL_PRIMARY_STAGES = {
+    "planned",
+    "created",
+    "building",
+    "generated",
+    "mutating",
+    "hybrid",
+    "seal-planned",
+    "sealed",
+    "removed",
+}
+_EXTERNAL_EVIDENCE_STAGES = {
+    "planned",
+    "writing",
+    "ready",
+    "removed",
+}
+_EXTERNAL_PUBLICATION_ACTIONS = (
+    "backup-primary",
+    "backup-evidence",
+    "publish-primary",
+    "publish-evidence",
+    "validate-pair",
+    "remove-primary-backup",
+    "remove-evidence-backup",
+)
+_EXTERNAL_NAMESPACE_PREFIX = ".liveusb-publish-"
 
 
 @dataclass(frozen=True)
@@ -148,6 +184,8 @@ class MountSession:
         self._entered = False
         self._recovering = False
         self._cleanup_attempted = False
+        self._preserve_external = False
+        self._external_acknowledged = False
 
     def __del__(self):
         descriptor = getattr(self, "_lock_descriptor", None)
@@ -175,6 +213,14 @@ class MountSession:
             if owned["stage"] != "removed"
         )
 
+    @property
+    def has_external_publication(self):
+        return (
+            self._state is not None
+            and self._state.get("external") is not None
+            and self._state["external"]["phase"] != "discarded"
+        )
+
     def __enter__(self):
         if self._entered:
             raise MountAcquisitionError(
@@ -182,8 +228,9 @@ class MountSession:
             )
         self._acquire_runtime_lock()
         try:
-            self._recover_existing_transaction()
-            self._initialize_journal()
+            resumed = self._recover_existing_transaction()
+            if not resumed:
+                self._initialize_journal()
         except BaseException:
             self._release_runtime_lock_quietly()
             raise
@@ -425,6 +472,422 @@ class MountSession:
             os.close(source_descriptor)
         return "/" + os.path.relpath(destination, self.ctx.fs_dir)
 
+    def begin_external_publication(
+        self,
+        primary_path,
+        evidence_path,
+        purpose,
+    ):
+        """Register one crash-durable external artifact pair."""
+        self._require_active_session()
+        self._validate_external_purpose(purpose)
+        primary_path = self._validate_external_final_path(
+            primary_path
+        )
+        evidence_path = self._validate_external_final_path(
+            evidence_path
+        )
+        if primary_path == evidence_path:
+            raise MountAcquisitionError(
+                "External publication targets must be distinct"
+            )
+        existing = self._state["external"]
+        if existing is not None:
+            if (
+                existing["purpose"] != purpose
+                or existing["primary"]["final_path"]
+                != primary_path
+                or existing["evidence"]["final_path"]
+                != evidence_path
+            ):
+                raise MountRecoveryError(
+                    "Recovered external publication does not match "
+                    "the requested targets"
+                )
+            if self._preflight_external(existing):
+                self._persist_journal()
+            return self._external_publication_view(
+                existing,
+                resumed=True,
+            )
+
+        self._reject_foreign_external_namespace()
+        prior_primary = self._capture_optional_external_file(
+            primary_path
+        )
+        prior_evidence = self._capture_optional_external_file(
+            evidence_path
+        )
+        if (prior_primary is None) != (prior_evidence is None):
+            raise MountRecoveryError(
+                "Existing external publication pair is incomplete"
+            )
+        namespace = (
+            _EXTERNAL_NAMESPACE_PREFIX
+            + self.token
+            + "-"
+            + uuid.uuid4().hex
+        )
+        primary_candidate = os.path.join(
+            self.work_root,
+            namespace + "-primary.candidate",
+        )
+        evidence_candidate = os.path.join(
+            self.work_root,
+            namespace + "-evidence.candidate",
+        )
+        primary_backup = os.path.join(
+            self.work_root,
+            namespace + "-primary.prior",
+        )
+        evidence_backup = os.path.join(
+            self.work_root,
+            namespace + "-evidence.prior",
+        )
+        record = {
+            "digest": None,
+            "evidence": {
+                "backup_path": evidence_backup,
+                "candidate_path": evidence_candidate,
+                "final_path": evidence_path,
+                "identity": None,
+                "prior_identity": prior_evidence,
+                "stage": "planned",
+            },
+            "pending_action": None,
+            "phase": "building",
+            "primary": {
+                "backup_path": primary_backup,
+                "candidate_path": primary_candidate,
+                "final_path": primary_path,
+                "identity": None,
+                "prior_identity": prior_primary,
+                "stage": "planned",
+            },
+            "publication_index": 0,
+            "purpose": purpose,
+            "root": self.work_root,
+            "root_identity": mounts.node_identity(
+                self.work_root
+            ),
+        }
+        self._state["external"] = record
+        self._persist_journal()
+        descriptor = self._create_external_file(
+            primary_candidate,
+            0o600,
+        )
+        try:
+            record["primary"]["identity"] = (
+                self._capture_descriptor_identity(descriptor)
+            )
+            record["primary"]["stage"] = "created"
+            self._persist_journal()
+        finally:
+            os.close(descriptor)
+        return self._external_publication_view(
+            record,
+            resumed=False,
+        )
+
+    def external_publication_view(
+        self,
+        primary_path,
+        evidence_path,
+        purpose,
+    ):
+        self._require_active_session()
+        record = self._require_external_publication(
+            primary_path,
+            evidence_path,
+            purpose,
+        )
+        if self._preflight_external(record):
+            self._persist_journal()
+        return self._external_publication_view(
+            record,
+            resumed=True,
+        )
+
+    def begin_external_primary_write(self):
+        record = self._require_external_record()
+        primary = record["primary"]
+        if (
+            record["phase"] != "building"
+            or primary["stage"] != "created"
+        ):
+            raise MountAcquisitionError(
+                "External primary is not ready for generation"
+            )
+        self._require_exact_external_identity(
+            primary["candidate_path"],
+            primary["identity"],
+        )
+        primary["stage"] = "building"
+        self._persist_journal()
+        return primary["candidate_path"]
+
+    def finish_external_primary_write(self):
+        record = self._require_external_record()
+        primary = record["primary"]
+        if (
+            record["phase"] != "building"
+            or primary["stage"] != "building"
+        ):
+            raise MountAcquisitionError(
+                "External primary generation was not started"
+            )
+        identity = self._capture_file_identity(
+            primary["candidate_path"]
+        )
+        if not self._same_file_node(
+            identity,
+            primary["identity"],
+        ):
+            raise MountRecoveryError(
+                "External primary inode changed during generation"
+            )
+        primary["identity"] = identity
+        primary["stage"] = "generated"
+        self._persist_journal()
+        return identity
+
+    def begin_external_primary_mutation(self):
+        record = self._require_external_record()
+        primary = record["primary"]
+        if (
+            record["phase"] != "building"
+            or primary["stage"] != "generated"
+        ):
+            raise MountAcquisitionError(
+                "External primary is not ready for mutation"
+            )
+        self._require_exact_external_identity(
+            primary["candidate_path"],
+            primary["identity"],
+        )
+        primary["stage"] = "mutating"
+        self._persist_journal()
+        return primary["candidate_path"]
+
+    def finish_external_primary_mutation(self):
+        record = self._require_external_record()
+        primary = record["primary"]
+        if (
+            record["phase"] != "building"
+            or primary["stage"] != "mutating"
+        ):
+            raise MountAcquisitionError(
+                "External primary mutation was not started"
+            )
+        identity = self._capture_file_identity(
+            primary["candidate_path"]
+        )
+        if not self._same_file_node(
+            identity,
+            primary["identity"],
+        ):
+            raise MountRecoveryError(
+                "External primary inode changed during mutation"
+            )
+        primary["identity"] = identity
+        primary["stage"] = "hybrid"
+        self._persist_journal()
+        return identity
+
+    def seal_external_primary(self, mode=0o555):
+        record = self._require_external_record()
+        primary = record["primary"]
+        if (
+            record["phase"] != "building"
+            or primary["stage"] != "hybrid"
+            or mode != 0o555
+        ):
+            raise MountAcquisitionError(
+                "External primary is not ready for sealing"
+            )
+        self._require_exact_external_identity(
+            primary["candidate_path"],
+            primary["identity"],
+        )
+        primary["stage"] = "seal-planned"
+        self._persist_journal()
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(primary["candidate_path"], flags)
+            try:
+                before = self._capture_descriptor_identity(
+                    descriptor
+                )
+                if before != primary["identity"]:
+                    raise MountRecoveryError(
+                        "External primary changed before sealing"
+                    )
+                os.fchmod(descriptor, mode)
+                os.fsync(descriptor)
+                identity = self._capture_descriptor_identity(
+                    descriptor
+                )
+            finally:
+                os.close(descriptor)
+        except messages.LiveUSBError:
+            raise
+        except OSError as error:
+            raise MountAcquisitionError(
+                "Unable to seal external primary"
+            ) from error
+        if (
+            not self._same_file_node(identity, before)
+            or identity["sha256"] != before["sha256"]
+            or identity["size"] != before["size"]
+            or identity["mode"] != mode
+        ):
+            raise MountRecoveryError(
+                "External primary sealing result is invalid"
+            )
+        self._fsync_directory(self.work_root)
+        primary["identity"] = identity
+        primary["stage"] = "sealed"
+        record["phase"] = "sealed"
+        self._persist_journal()
+        return identity
+
+    def record_external_digest(self, digest):
+        record = self._require_external_record()
+        if (
+            record["phase"] != "sealed"
+            or record["primary"]["stage"] != "sealed"
+            or not self._is_hex(digest, 64)
+        ):
+            raise MountAcquisitionError(
+                "External digest cannot be recorded"
+            )
+        identity = self._require_exact_external_identity(
+            record["primary"]["candidate_path"],
+            record["primary"]["identity"],
+        )
+        if identity["sha256"] != digest:
+            raise MountRecoveryError(
+                "External digest does not match the sealed primary"
+            )
+        record["digest"] = digest
+        self._persist_journal()
+
+    def write_external_evidence(self, payload, mode=0o644):
+        record = self._require_external_record()
+        evidence = record["evidence"]
+        if (
+            record["phase"] != "sealed"
+            or record["digest"] is None
+            or evidence["stage"] != "planned"
+            or not isinstance(payload, bytes)
+            or mode != 0o644
+        ):
+            raise MountAcquisitionError(
+                "External evidence is not ready for writing"
+            )
+        try:
+            descriptor = self._create_external_file(
+                evidence["candidate_path"],
+                0o600,
+            )
+            try:
+                evidence["identity"] = (
+                    self._capture_descriptor_identity(descriptor)
+                )
+                evidence["stage"] = "writing"
+                self._persist_journal()
+                self._write_all(descriptor, payload)
+                os.fchmod(descriptor, mode)
+                os.fsync(descriptor)
+                identity = self._capture_descriptor_identity(
+                    descriptor
+                )
+            finally:
+                os.close(descriptor)
+        except messages.LiveUSBError:
+            raise
+        except OSError as error:
+            raise MountAcquisitionError(
+                "Unable to write external evidence"
+            ) from error
+        expected_digest = hashlib.sha256(payload).hexdigest()
+        if (
+            identity["sha256"] != expected_digest
+            or identity["size"] != len(payload)
+            or identity["mode"] != mode
+            or not self._same_file_node(
+                identity,
+                evidence["identity"],
+            )
+        ):
+            raise MountRecoveryError(
+                "External evidence write is not exact"
+            )
+        self._fsync_directory(self.work_root)
+        evidence["identity"] = identity
+        evidence["stage"] = "ready"
+        record["phase"] = "ready"
+        self._persist_journal()
+        return identity
+
+    def publish_external_pair(self, validator=None):
+        record = self._require_external_record()
+        if self._preflight_external(record):
+            self._persist_journal()
+        if record["phase"] not in {
+            "ready",
+            "publishing",
+            "published",
+        }:
+            raise MountAcquisitionError(
+                "External publication pair is not ready"
+            )
+        if record["phase"] == "ready":
+            record["phase"] = "publishing"
+            self._persist_journal()
+        while record["publication_index"] < len(
+            _EXTERNAL_PUBLICATION_ACTIONS
+        ):
+            action_index = record["publication_index"]
+            record["pending_action"] = action_index
+            self._persist_journal()
+            try:
+                self._perform_external_publication_action(
+                    record,
+                    action_index,
+                    validator=validator,
+                )
+            except messages.LiveUSBError:
+                raise
+            except OSError as error:
+                raise MountRecoveryError(
+                    "External publication action failed"
+                ) from error
+            record["publication_index"] = action_index + 1
+            record["pending_action"] = None
+            if record["publication_index"] >= 4:
+                record["phase"] = "published"
+            if record["publication_index"] == len(
+                _EXTERNAL_PUBLICATION_ACTIONS
+            ):
+                record["phase"] = "complete"
+            self._persist_journal()
+        self._external_acknowledged = True
+        return record["digest"]
+
+    def acknowledge_external_publication(self):
+        record = self._require_external_record()
+        if record["phase"] != "complete":
+            raise MountAcquisitionError(
+                "External publication is not complete"
+            )
+        self._preflight_external(record)
+        self._external_acknowledged = True
+        return record["digest"]
+
     def cleanup(self):
         self._cleanup_attempted = True
         acquired_here = False
@@ -455,7 +918,10 @@ class MountSession:
         failures: List[MountCleanupFailure] = []
         try:
             self._preflight_cleanup()
-            if self._state["phase"] != "cleaning":
+            if (
+                not self._preserve_external
+                and self._state["phase"] != "cleaning"
+            ):
                 self._state["phase"] = "cleaning"
                 self._persist_journal()
 
@@ -480,6 +946,17 @@ class MountSession:
                     artifact["path"],
                     lambda artifact=artifact: (
                         self._cleanup_artifact(artifact)
+                    ),
+                )
+
+            if self._state["external"] is not None:
+                self._attempt_cleanup(
+                    failures,
+                    "reconcile_external_artifacts",
+                    self._state["external"]["root"],
+                    lambda: self._cleanup_external(
+                        self._state["external"],
+                        preserve=self._preserve_external,
                     ),
                 )
 
@@ -510,7 +987,20 @@ class MountSession:
                     self._cleanup_x_access,
                 )
 
-            if not failures:
+            if not failures and self._preserve_external:
+                active = self._active_resource_descriptions()
+                if active:
+                    failures.append(
+                        MountCleanupFailure(
+                            "preserve_external_publication",
+                            self.journal_path,
+                            MountRecoveryError(
+                                "Non-publication resources remain: "
+                                + ", ".join(active)
+                            ),
+                        )
+                    )
+            elif not failures:
                 active = self._active_resource_descriptions()
                 if active:
                     failures.append(
@@ -820,6 +1310,17 @@ class MountSession:
                 or changed
             )
         changed = self._preflight_x(candidate["x"]) or changed
+        if candidate["external"] is not None:
+            changed = (
+                self._preflight_external(candidate["external"])
+                or changed
+            )
+        self._preserve_external = (
+            candidate["external"] is not None
+            and self._external_is_resumable(
+                candidate["external"]
+            )
+        )
 
         if changed:
             self._state = candidate
@@ -1392,6 +1893,23 @@ class MountSession:
             for field in fields
         )
 
+    def _require_external_node_identity(self, path, expected):
+        actual = self._capture_file_node_identity(path)
+        for field in (
+            "dev",
+            "ino",
+            "kind",
+            "mode",
+            "nlink",
+            "owner",
+            "size",
+        ):
+            if actual[field] != expected[field]:
+                raise MountRecoveryError(
+                    f"External artifact node changed: {path}"
+                )
+        return actual
+
     def _cleanup_directory(self, directory):
         if directory["stage"] in {"staged", "rename-planned"}:
             target = directory["staging_path"]
@@ -1633,6 +2151,690 @@ class MountSession:
             record["stage"] = "created"
             self._persist_journal()
 
+    def _require_external_record(self):
+        self._require_active_session()
+        record = self._state["external"]
+        if record is None:
+            raise MountAcquisitionError(
+                "No external publication is active"
+            )
+        return record
+
+    def _require_external_publication(
+        self,
+        primary_path,
+        evidence_path,
+        purpose,
+    ):
+        record = self._require_external_record()
+        primary_path = self._validate_external_final_path(
+            primary_path
+        )
+        evidence_path = self._validate_external_final_path(
+            evidence_path
+        )
+        if (
+            record["purpose"] != purpose
+            or record["primary"]["final_path"] != primary_path
+            or record["evidence"]["final_path"] != evidence_path
+        ):
+            raise MountRecoveryError(
+                "External publication request does not match custody"
+            )
+        return record
+
+    @staticmethod
+    def _external_publication_view(record, resumed):
+        return {
+            "digest": record["digest"],
+            "evidence_candidate": record["evidence"][
+                "candidate_path"
+            ],
+            "evidence_final": record["evidence"]["final_path"],
+            "evidence_stage": record["evidence"]["stage"],
+            "phase": record["phase"],
+            "primary_candidate": record["primary"][
+                "candidate_path"
+            ],
+            "primary_final": record["primary"]["final_path"],
+            "primary_stage": record["primary"]["stage"],
+            "publication_index": record["publication_index"],
+            "purpose": record["purpose"],
+            "resumed": bool(resumed),
+        }
+
+    def current_external_publication(self):
+        record = self._require_external_record()
+        if self._preflight_external(record):
+            self._persist_journal()
+        return self._external_publication_view(
+            record,
+            resumed=True,
+        )
+
+    @staticmethod
+    def _validate_external_purpose(purpose):
+        if (
+            not isinstance(purpose, str)
+            or not purpose
+            or not purpose.replace("-", "").isalnum()
+        ):
+            raise MountAcquisitionError(
+                "External publication purpose is invalid"
+            )
+
+    def _validate_external_final_path(self, path):
+        if (
+            not isinstance(path, str)
+            or not os.path.isabs(path)
+            or os.path.normpath(path) != path
+            or os.path.dirname(path) != self.work_root
+            or not os.path.basename(path)
+            or os.path.realpath(os.path.dirname(path))
+            != self.work_root
+        ):
+            raise MountRecoveryError(
+                f"External publication path escapes work custody: {path}"
+            )
+        try:
+            root_state = os.lstat(self.work_root)
+        except OSError as error:
+            raise MountRecoveryError(
+                "External publication root is unavailable"
+            ) from error
+        if (
+            not stat.S_ISDIR(root_state.st_mode)
+            or stat.S_ISLNK(root_state.st_mode)
+        ):
+            raise MountRecoveryError(
+                "External publication root is not literal"
+            )
+        if os.path.lexists(path) and os.path.islink(path):
+            raise MountRecoveryError(
+                f"External publication target is a symbolic link: {path}"
+            )
+        return path
+
+    def _validate_external_auxiliary_path(self, path, token):
+        if (
+            not isinstance(path, str)
+            or not os.path.isabs(path)
+            or os.path.normpath(path) != path
+            or os.path.dirname(path) != self.work_root
+            or not os.path.basename(path).startswith(
+                _EXTERNAL_NAMESPACE_PREFIX + token + "-"
+            )
+        ):
+            raise MountRecoveryError(
+                "External artifact namespace is invalid"
+            )
+        return path
+
+    def _reject_foreign_external_namespace(self):
+        try:
+            names = os.listdir(self.work_root)
+        except OSError as error:
+            raise MountRecoveryError(
+                "Unable to inspect external publication namespace"
+            ) from error
+        foreign = sorted(
+            name
+            for name in names
+            if name.startswith(_EXTERNAL_NAMESPACE_PREFIX)
+        )
+        if foreign:
+            raise MountRecoveryError(
+                "Foreign external publication artifacts exist"
+            )
+
+    def _capture_optional_external_file(self, path):
+        self._validate_external_final_path(path)
+        if not os.path.lexists(path):
+            return None
+        try:
+            return self._capture_file_identity(path)
+        except OSError as error:
+            raise MountRecoveryError(
+                f"External publication file is invalid: {path}"
+            ) from error
+
+    def _create_external_file(self, path, mode):
+        token = self._state["owner"]["token"]
+        self._validate_external_auxiliary_path(path, token)
+        if mode != 0o600:
+            raise MountAcquisitionError(
+                "External staging files must begin private"
+            )
+        flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags, mode)
+            try:
+                self._validate_secure_file_state(
+                    os.fstat(descriptor),
+                    "External staging file",
+                )
+                os.fsync(descriptor)
+                self._fsync_directory(self.work_root)
+            except BaseException:
+                os.close(descriptor)
+                raise
+        except messages.LiveUSBError:
+            raise
+        except OSError as error:
+            raise MountAcquisitionError(
+                "Unable to create external staging file"
+            ) from error
+        return descriptor
+
+    def _require_exact_external_identity(
+        self,
+        path,
+        expected,
+    ):
+        try:
+            actual = self._capture_file_identity(path)
+        except OSError as error:
+            raise MountRecoveryError(
+                f"External artifact is unavailable: {path}"
+            ) from error
+        if actual != expected:
+            raise MountRecoveryError(
+                f"External artifact identity changed: {path}"
+            )
+        return actual
+
+    def _external_is_resumable(self, record):
+        if record["phase"] == "complete":
+            return not self._external_acknowledged
+        return record["phase"] in {
+            "sealed",
+            "ready",
+            "publishing",
+            "published",
+        }
+
+    def _preflight_external(self, record):
+        changed = False
+        if not mounts.directory_identity_matches(
+            record["root"],
+            record["root_identity"],
+        ):
+            raise MountRecoveryError(
+                "External publication root identity changed"
+            )
+        if record["phase"] in {
+            "publishing",
+            "published",
+        }:
+            return self._reconcile_external_publication(record)
+        if record["phase"] == "complete":
+            self._require_external_layout(
+                record,
+                len(_EXTERNAL_PUBLICATION_ACTIONS),
+                full=True,
+            )
+            return False
+        if record["phase"] == "discarded":
+            self._require_external_layout(
+                record,
+                0,
+                full=True,
+                omit_candidates=True,
+            )
+            for role in ("primary", "evidence"):
+                if os.path.lexists(
+                    record[role]["candidate_path"]
+                ):
+                    raise MountRecoveryError(
+                        "Discarded external artifact reappeared"
+                    )
+            return False
+        if (
+            record["publication_index"] != 0
+            or record["pending_action"] is not None
+        ):
+            raise MountRecoveryError(
+                "External pre-publication state has action residue"
+            )
+        self._require_external_layout(
+            record,
+            0,
+            full=False,
+            omit_candidates=True,
+        )
+        primary = record["primary"]
+        evidence = record["evidence"]
+        primary_exists = os.path.lexists(
+            primary["candidate_path"]
+        )
+        if primary["stage"] in {"planned", "removed"}:
+            if primary_exists:
+                raise MountRecoveryError(
+                    "Unproved external primary candidate exists"
+                )
+        elif not primary_exists:
+            raise MountRecoveryError(
+                "External primary candidate is absent"
+            )
+        elif primary["stage"] in {"building", "mutating"}:
+            actual = self._capture_file_identity(
+                primary["candidate_path"]
+            )
+            if not self._same_file_node(
+                actual,
+                primary["identity"],
+            ):
+                raise MountRecoveryError(
+                    "Mutable external primary inode changed"
+                )
+        elif primary["stage"] == "seal-planned":
+            actual = self._capture_file_identity(
+                primary["candidate_path"]
+            )
+            if actual == primary["identity"]:
+                pass
+            elif (
+                self._same_file_node(
+                    actual,
+                    primary["identity"],
+                )
+                and actual["sha256"]
+                == primary["identity"]["sha256"]
+                and actual["size"]
+                == primary["identity"]["size"]
+                and actual["mode"] == 0o555
+            ):
+                primary["identity"] = actual
+                primary["stage"] = "sealed"
+                record["phase"] = "sealed"
+                changed = True
+            else:
+                raise MountRecoveryError(
+                    "Interrupted external seal is ambiguous"
+                )
+        elif primary["stage"] != "removed":
+            self._require_exact_external_identity(
+                primary["candidate_path"],
+                primary["identity"],
+            )
+
+        evidence_exists = os.path.lexists(
+            evidence["candidate_path"]
+        )
+        if evidence["stage"] in {"planned", "removed"}:
+            if evidence_exists:
+                raise MountRecoveryError(
+                    "Unproved external evidence candidate exists"
+                )
+        elif evidence["stage"] == "writing":
+            if not evidence_exists:
+                raise MountRecoveryError(
+                    "External evidence disappeared while writing"
+                )
+            actual = self._capture_file_identity(
+                evidence["candidate_path"]
+            )
+            if not self._same_file_node(
+                actual,
+                evidence["identity"],
+            ):
+                raise MountRecoveryError(
+                    "External evidence inode changed while writing"
+                )
+        elif evidence["stage"] != "removed":
+            self._require_exact_external_identity(
+                evidence["candidate_path"],
+                evidence["identity"],
+            )
+        return changed
+
+    def _cleanup_external(self, record, preserve):
+        if preserve:
+            evidence = record["evidence"]
+            if evidence["stage"] == "writing":
+                actual = self._capture_file_identity(
+                    evidence["candidate_path"]
+                )
+                if not self._same_file_node(
+                    actual,
+                    evidence["identity"],
+                ):
+                    raise MountRecoveryError(
+                        "Partial external evidence changed"
+                    )
+                os.unlink(evidence["candidate_path"])
+                self._fsync_directory(self.work_root)
+                evidence["identity"] = None
+                evidence["stage"] = "planned"
+                self._persist_journal()
+            return
+        if record["phase"] in {"complete", "discarded"}:
+            return
+        if record["phase"] != "building":
+            raise MountRecoveryError(
+                "Resumable external publication cannot be discarded"
+            )
+        for role in ("evidence", "primary"):
+            artifact = record[role]
+            if artifact["stage"] in {"planned", "removed"}:
+                if os.path.lexists(artifact["candidate_path"]):
+                    raise MountRecoveryError(
+                        "Unproved external artifact blocks cleanup"
+                    )
+                artifact["stage"] = "removed"
+                continue
+            actual = self._capture_file_identity(
+                artifact["candidate_path"]
+            )
+            if artifact["stage"] in {
+                "building",
+                "mutating",
+                "writing",
+            }:
+                matches = self._same_file_node(
+                    actual,
+                    artifact["identity"],
+                )
+            else:
+                matches = actual == artifact["identity"]
+            if not matches:
+                raise MountRecoveryError(
+                    "External artifact changed before cleanup"
+                )
+            os.unlink(artifact["candidate_path"])
+            self._fsync_directory(self.work_root)
+            artifact["stage"] = "removed"
+            self._persist_journal()
+        record["phase"] = "discarded"
+        self._persist_journal()
+
+    def _external_expected_layout(self, record, index):
+        if (
+            type(index) is not int
+            or index < 0
+            or index > len(_EXTERNAL_PUBLICATION_ACTIONS)
+        ):
+            raise MountRecoveryError(
+                "External publication index is invalid"
+            )
+        primary = record["primary"]
+        evidence = record["evidence"]
+        expected = {
+            primary["final_path"]: None,
+            primary["candidate_path"]: None,
+            primary["backup_path"]: None,
+            evidence["final_path"]: None,
+            evidence["candidate_path"]: None,
+            evidence["backup_path"]: None,
+        }
+        if primary["prior_identity"] is not None:
+            if index < 1:
+                expected[primary["final_path"]] = (
+                    primary["prior_identity"]
+                )
+            elif index < 6:
+                expected[primary["backup_path"]] = (
+                    primary["prior_identity"]
+                )
+        if evidence["prior_identity"] is not None:
+            if index < 2:
+                expected[evidence["final_path"]] = (
+                    evidence["prior_identity"]
+                )
+            elif index < 7:
+                expected[evidence["backup_path"]] = (
+                    evidence["prior_identity"]
+                )
+        if index < 3:
+            expected[primary["candidate_path"]] = (
+                primary["identity"]
+            )
+        else:
+            expected[primary["final_path"]] = primary["identity"]
+        if index < 4:
+            expected[evidence["candidate_path"]] = (
+                evidence["identity"]
+            )
+        else:
+            expected[evidence["final_path"]] = (
+                evidence["identity"]
+            )
+        return expected
+
+    def _external_layout_matches(
+        self,
+        record,
+        index,
+        full,
+        omit_candidates=False,
+    ):
+        expected = self._external_expected_layout(record, index)
+        for path, identity in expected.items():
+            if omit_candidates and path in {
+                record["primary"]["candidate_path"],
+                record["evidence"]["candidate_path"],
+            }:
+                continue
+            if identity is None:
+                if os.path.lexists(path):
+                    return False
+                continue
+            if not os.path.lexists(path):
+                return False
+            try:
+                if full:
+                    actual = self._capture_file_identity(path)
+                else:
+                    actual = self._capture_file_node_identity(
+                        path
+                    )
+            except (OSError, MountRecoveryError):
+                return False
+            if full:
+                if actual != identity:
+                    return False
+            elif any(
+                actual[field] != identity[field]
+                for field in (
+                    "dev",
+                    "ino",
+                    "kind",
+                    "mode",
+                    "nlink",
+                    "owner",
+                    "size",
+                )
+            ):
+                return False
+        return True
+
+    def _require_external_layout(
+        self,
+        record,
+        index,
+        full,
+        omit_candidates=False,
+    ):
+        if not self._external_layout_matches(
+            record,
+            index,
+            full,
+            omit_candidates=omit_candidates,
+        ):
+            raise MountRecoveryError(
+                "External publication layout is ambiguous"
+            )
+
+    def _reconcile_external_publication(self, record):
+        index = record["publication_index"]
+        pending = record["pending_action"]
+        if pending is None:
+            self._require_external_layout(
+                record,
+                index,
+                full=True,
+            )
+            return False
+        if pending != index:
+            raise MountRecoveryError(
+                "External pending action does not match its index"
+            )
+        pre_matches = self._external_layout_matches(
+            record,
+            index,
+            full=True,
+        )
+        post_matches = self._external_layout_matches(
+            record,
+            index + 1,
+            full=True,
+        )
+        action = _EXTERNAL_PUBLICATION_ACTIONS[index]
+        if action == "validate-pair":
+            if not pre_matches:
+                raise MountRecoveryError(
+                    "External pair validation boundary changed"
+                )
+            record["pending_action"] = None
+            self._set_external_phase_from_index(record)
+            return True
+        no_op = (
+            action == "backup-primary"
+            and record["primary"]["prior_identity"] is None
+        ) or (
+            action == "backup-evidence"
+            and record["evidence"]["prior_identity"] is None
+        ) or (
+            action == "remove-primary-backup"
+            and record["primary"]["prior_identity"] is None
+        ) or (
+            action == "remove-evidence-backup"
+            and record["evidence"]["prior_identity"] is None
+        )
+        if post_matches and (not pre_matches or no_op):
+            record["publication_index"] = index + 1
+        elif pre_matches and not post_matches:
+            pass
+        else:
+            raise MountRecoveryError(
+                "External publication interruption is ambiguous"
+            )
+        record["pending_action"] = None
+        self._set_external_phase_from_index(record)
+        return True
+
+    @staticmethod
+    def _set_external_phase_from_index(record):
+        index = record["publication_index"]
+        if index < 4:
+            record["phase"] = "publishing"
+        elif index < len(_EXTERNAL_PUBLICATION_ACTIONS):
+            record["phase"] = "published"
+        else:
+            record["phase"] = "complete"
+
+    def _perform_external_publication_action(
+        self,
+        record,
+        action_index,
+        validator=None,
+    ):
+        self._require_external_layout(
+            record,
+            action_index,
+            full=False,
+        )
+        action = _EXTERNAL_PUBLICATION_ACTIONS[action_index]
+        primary = record["primary"]
+        evidence = record["evidence"]
+        if action == "backup-primary":
+            self._move_external_file(
+                primary["final_path"],
+                primary["backup_path"],
+                primary["prior_identity"],
+            )
+        elif action == "backup-evidence":
+            self._move_external_file(
+                evidence["final_path"],
+                evidence["backup_path"],
+                evidence["prior_identity"],
+            )
+        elif action == "publish-primary":
+            self._move_external_file(
+                primary["candidate_path"],
+                primary["final_path"],
+                primary["identity"],
+            )
+        elif action == "publish-evidence":
+            self._move_external_file(
+                evidence["candidate_path"],
+                evidence["final_path"],
+                evidence["identity"],
+            )
+        elif action == "validate-pair":
+            self._require_external_layout(
+                record,
+                action_index,
+                full=True,
+            )
+            if validator is not None:
+                validator(
+                    primary["final_path"],
+                    evidence["final_path"],
+                )
+            self._fsync_directory(self.work_root)
+        elif action == "remove-primary-backup":
+            self._remove_external_backup(
+                primary["backup_path"],
+                primary["prior_identity"],
+            )
+        elif action == "remove-evidence-backup":
+            self._remove_external_backup(
+                evidence["backup_path"],
+                evidence["prior_identity"],
+            )
+        else:
+            raise MountRecoveryError(
+                "External publication action is unknown"
+            )
+        self._require_external_layout(
+            record,
+            action_index + 1,
+            full=False,
+        )
+
+    def _move_external_file(self, source, destination, identity):
+        if identity is None:
+            if os.path.lexists(source) or os.path.lexists(destination):
+                raise MountRecoveryError(
+                    "Absent external artifact has live evidence"
+                )
+            return
+        self._require_external_node_identity(source, identity)
+        if os.path.lexists(destination):
+            raise MountRecoveryError(
+                "External publication destination is occupied"
+            )
+        os.rename(source, destination)
+        self._fsync_directory(self.work_root)
+        self._require_external_node_identity(
+            destination,
+            identity,
+        )
+
+    def _remove_external_backup(self, path, identity):
+        if identity is None:
+            if os.path.lexists(path):
+                raise MountRecoveryError(
+                    "Absent prior artifact has backup residue"
+                )
+            return
+        self._require_external_node_identity(path, identity)
+        os.unlink(path)
+        self._fsync_directory(self.work_root)
+
     def _create_staged_file(self, destination):
         mounts.validate_mount_destination(
             self.ctx,
@@ -1671,14 +2873,51 @@ class MountSession:
         return descriptor
 
     def _capture_file_identity(self, path):
+        path_state = os.lstat(path)
+        if (
+            not stat.S_ISREG(path_state.st_mode)
+            or stat.S_ISLNK(path_state.st_mode)
+        ):
+            raise MountRecoveryError(
+                f"Artifact is not a regular file: {path}"
+            )
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         descriptor = os.open(path, flags)
         try:
+            descriptor_state = os.fstat(descriptor)
+            if (
+                descriptor_state.st_dev != path_state.st_dev
+                or descriptor_state.st_ino != path_state.st_ino
+            ):
+                raise MountRecoveryError(
+                    f"Artifact identity changed while opening: {path}"
+                )
             return self._capture_descriptor_identity(descriptor)
         finally:
             os.close(descriptor)
+
+    def _capture_file_node_identity(self, path):
+        state = os.lstat(path)
+        if (
+            not stat.S_ISREG(state.st_mode)
+            or stat.S_ISLNK(state.st_mode)
+            or state.st_nlink != 1
+            or state.st_uid != os.geteuid()
+        ):
+            raise MountRecoveryError(
+                f"Artifact node custody is invalid: {path}"
+            )
+        return {
+            "dev": state.st_dev,
+            "ino": state.st_ino,
+            "kind": "file",
+            "mode": stat.S_IMODE(state.st_mode),
+            "nlink": state.st_nlink,
+            "owner": state.st_uid,
+            "size": state.st_size,
+        }
 
     def _capture_descriptor_identity(self, descriptor):
         stat_result = os.fstat(descriptor)
@@ -1808,6 +3047,7 @@ class MountSession:
         self._state = {
             "artifacts": [],
             "directories": [],
+            "external": None,
             "mounts": [],
             "owner": {
                 "pid": os.getpid(),
@@ -1829,21 +3069,56 @@ class MountSession:
         }
         self._journal_active = False
         self._cleanup_attempted = False
+        self._preserve_external = False
+        self._external_acknowledged = False
         self._persist_journal()
 
     def _recover_existing_transaction(self):
         self._reconcile_pending_journal()
         if not os.path.lexists(self.journal_path):
-            return
+            return False
         self._load_existing_journal()
         self._recovering = True
         try:
+            external = self._state["external"]
+            if external is not None:
+                changed = self._preflight_external(external)
+                if changed:
+                    self._persist_journal()
+                if self._external_is_resumable(external):
+                    if (
+                        self._state["mounts"]
+                        or self._state["directories"]
+                        or self._state["artifacts"]
+                        or self._state["x"]["stage"]
+                        not in {
+                            "unexamined",
+                            "no-change",
+                            "restored",
+                            "failed",
+                        }
+                    ):
+                        raise MountRecoveryError(
+                            "Resumable external publication has "
+                            "unrelated active resources"
+                        )
+                    self._cleanup_external(
+                        external,
+                        preserve=True,
+                    )
+                    self._preserve_external = True
+                    self._cleanup_attempted = False
+                    return True
             self.cleanup()
         finally:
             self._recovering = False
         self._state = None
         self._persisted_state = None
         self._journal_active = False
+        self._cleanup_attempted = False
+        self._preserve_external = False
+        self._external_acknowledged = False
+        return False
 
     def _load_existing_journal(self):
         self._state = self._read_journal()
@@ -2052,6 +3327,7 @@ class MountSession:
             or candidate["mounts"]
             or candidate["directories"]
             or candidate["artifacts"]
+            or candidate["external"] is not None
             or candidate["x"]
             != {
                 "before": None,
@@ -2121,6 +3397,18 @@ class MountSession:
                     "Pending journal resource transition is invalid"
                 )
             added += len(next_records) - len(previous_records)
+        external_added = (
+            current["external"] is None
+            and candidate["external"] is not None
+        )
+        if (
+            current["external"] is not None
+            and candidate["external"] is None
+        ):
+            raise MountRecoveryError(
+                "Pending journal removes external custody"
+            )
+        added += int(external_added)
         if added > 1:
             raise MountRecoveryError(
                 "Pending journal appends multiple resources"
@@ -2136,6 +3424,10 @@ class MountSession:
         self._validate_pending_artifact_transitions(
             current["artifacts"],
             candidate["artifacts"],
+        )
+        self._validate_pending_external_transition(
+            current["external"],
+            candidate["external"],
         )
         self._validate_pending_x_transition(
             current["x"],
@@ -2153,6 +3445,10 @@ class MountSession:
                     "directories",
                     "artifacts",
                 )
+            )
+            or (
+                not external_added
+                and candidate["external"] != current["external"]
             )
         ):
             raise MountRecoveryError(
@@ -2509,6 +3805,325 @@ class MountSession:
                     "Pending journal appended artifact is not initial"
                 )
 
+    def _validate_pending_external_transition(
+        self,
+        previous,
+        candidate,
+    ):
+        if previous is None:
+            if candidate is None:
+                return
+            if (
+                candidate["phase"] != "building"
+                or candidate["digest"] is not None
+                or candidate["publication_index"] != 0
+                or candidate["pending_action"] is not None
+                or candidate["primary"]["stage"] != "planned"
+                or candidate["primary"]["identity"] is not None
+                or candidate["evidence"]["stage"] != "planned"
+                or candidate["evidence"]["identity"] is not None
+            ):
+                raise MountRecoveryError(
+                    "Pending external custody is not initial"
+                )
+            return
+        if candidate is None:
+            raise MountRecoveryError(
+                "Pending external custody disappears"
+            )
+        stable_record_fields = (
+            "purpose",
+            "root",
+            "root_identity",
+        )
+        if any(
+            previous[field] != candidate[field]
+            for field in stable_record_fields
+        ):
+            raise MountRecoveryError(
+                "Pending journal changes external root custody"
+            )
+        for role in ("primary", "evidence"):
+            stable_slot_fields = (
+                "backup_path",
+                "candidate_path",
+                "final_path",
+                "prior_identity",
+            )
+            if any(
+                previous[role][field]
+                != candidate[role][field]
+                for field in stable_slot_fields
+            ):
+                raise MountRecoveryError(
+                    "Pending journal changes external artifact custody"
+                )
+        if candidate == previous:
+            return
+        if self._is_external_primary_transition(
+            previous,
+            candidate,
+        ):
+            return
+        if self._is_external_evidence_transition(
+            previous,
+            candidate,
+        ):
+            return
+        if self._is_external_digest_transition(
+            previous,
+            candidate,
+        ):
+            return
+        if self._is_external_publication_transition(
+            previous,
+            candidate,
+        ):
+            return
+        if self._is_external_discard_transition(
+            previous,
+            candidate,
+        ):
+            return
+        raise MountRecoveryError(
+            "Pending journal external transition is invalid"
+        )
+
+    def _is_external_primary_transition(
+        self,
+        previous,
+        candidate,
+    ):
+        if (
+            previous["evidence"] != candidate["evidence"]
+            or previous["digest"] != candidate["digest"]
+            or previous["publication_index"]
+            != candidate["publication_index"]
+            or previous["pending_action"]
+            != candidate["pending_action"]
+        ):
+            return False
+        old = previous["primary"]
+        new = candidate["primary"]
+        allowed = {
+            "planned": {"created", "removed"},
+            "created": {"building", "removed"},
+            "building": {"generated", "removed"},
+            "generated": {"mutating", "removed"},
+            "mutating": {"hybrid", "removed"},
+            "hybrid": {"seal-planned", "removed"},
+            "seal-planned": {"sealed", "removed"},
+            "sealed": {"sealed"},
+            "removed": {"removed"},
+        }
+        if new["stage"] not in allowed[old["stage"]]:
+            return False
+        if old["stage"] == "planned" and new["stage"] == "created":
+            identity_valid = (
+                old["identity"] is None
+                and new["identity"] is not None
+            )
+        elif old["stage"] in {"building", "mutating"} and (
+            new["stage"] in {"generated", "hybrid"}
+        ):
+            identity_valid = self._same_file_node(
+                old["identity"],
+                new["identity"],
+            )
+        elif (
+            old["stage"] == "seal-planned"
+            and new["stage"] == "sealed"
+        ):
+            identity_valid = (
+                self._same_file_node(
+                    old["identity"],
+                    new["identity"],
+                )
+                and old["identity"]["sha256"]
+                == new["identity"]["sha256"]
+                and old["identity"]["size"]
+                == new["identity"]["size"]
+                and new["identity"]["mode"] == 0o555
+            )
+        else:
+            identity_valid = (
+                old["identity"] == new["identity"]
+            )
+        if not identity_valid:
+            return False
+        expected_phase = previous["phase"]
+        if new["stage"] == "sealed":
+            expected_phase = "sealed"
+        return candidate["phase"] == expected_phase
+
+    def _is_external_evidence_transition(
+        self,
+        previous,
+        candidate,
+    ):
+        if (
+            previous["primary"] != candidate["primary"]
+            or previous["digest"] != candidate["digest"]
+            or previous["publication_index"]
+            != candidate["publication_index"]
+            or previous["pending_action"]
+            != candidate["pending_action"]
+        ):
+            return False
+        old = previous["evidence"]
+        new = candidate["evidence"]
+        if old["stage"] == "planned" and new["stage"] == "writing":
+            identity_valid = (
+                old["identity"] is None
+                and new["identity"] is not None
+            )
+            phase_valid = (
+                previous["phase"] == candidate["phase"] == "sealed"
+            )
+        elif old["stage"] == "writing" and new["stage"] == "ready":
+            identity_valid = self._same_file_node(
+                old["identity"],
+                new["identity"],
+            )
+            phase_valid = (
+                previous["phase"] == "sealed"
+                and candidate["phase"] == "ready"
+            )
+        elif old["stage"] == "writing" and new["stage"] == "planned":
+            identity_valid = new["identity"] is None
+            phase_valid = (
+                previous["phase"] == candidate["phase"] == "sealed"
+            )
+        elif (
+            old["stage"] in {"planned", "writing"}
+            and new["stage"] == "removed"
+        ):
+            identity_valid = (
+                new["identity"] == old["identity"]
+            )
+            phase_valid = (
+                previous["phase"] == candidate["phase"]
+            )
+        else:
+            return False
+        return identity_valid and phase_valid
+
+    @staticmethod
+    def _is_external_digest_transition(previous, candidate):
+        return (
+            previous["phase"] == candidate["phase"] == "sealed"
+            and previous["primary"] == candidate["primary"]
+            and previous["evidence"] == candidate["evidence"]
+            and previous["digest"] is None
+            and MountSession._is_hex(candidate["digest"], 64)
+            and previous["publication_index"]
+            == candidate["publication_index"] == 0
+            and previous["pending_action"] is None
+            and candidate["pending_action"] is None
+        )
+
+    @staticmethod
+    def _is_external_publication_transition(
+        previous,
+        candidate,
+    ):
+        if (
+            previous["primary"] != candidate["primary"]
+            or previous["evidence"] != candidate["evidence"]
+            or previous["digest"] != candidate["digest"]
+        ):
+            return False
+        old_index = previous["publication_index"]
+        new_index = candidate["publication_index"]
+        old_pending = previous["pending_action"]
+        new_pending = candidate["pending_action"]
+        if (
+            previous["phase"] == "ready"
+            and candidate["phase"] == "publishing"
+            and old_index == new_index == 0
+            and old_pending is None
+            and new_pending is None
+        ):
+            return True
+        if (
+            new_index == old_index
+            and old_pending is None
+            and new_pending == old_index
+            and previous["phase"] == candidate["phase"]
+        ):
+            return True
+        if (
+            new_index == old_index
+            and old_pending == old_index
+            and new_pending is None
+            and previous["phase"] == candidate["phase"]
+        ):
+            return True
+        if (
+            new_index == old_index + 1
+            and old_pending == old_index
+            and new_pending is None
+        ):
+            if new_index < 4:
+                expected_phase = "publishing"
+            elif new_index < len(
+                _EXTERNAL_PUBLICATION_ACTIONS
+            ):
+                expected_phase = "published"
+            else:
+                expected_phase = "complete"
+            return candidate["phase"] == expected_phase
+        return False
+
+    @staticmethod
+    def _is_external_discard_transition(
+        previous,
+        candidate,
+    ):
+        if (
+            previous["phase"] == candidate["phase"] == "building"
+            and previous["digest"] == candidate["digest"] is None
+            and previous["publication_index"]
+            == candidate["publication_index"] == 0
+            and previous["pending_action"] is None
+            and candidate["pending_action"] is None
+        ):
+            changed_roles = [
+                role
+                for role in ("primary", "evidence")
+                if previous[role] != candidate[role]
+            ]
+            if len(changed_roles) == 1:
+                role = changed_roles[0]
+                old = previous[role]
+                new = candidate[role]
+                return (
+                    new["stage"] == "removed"
+                    and new["identity"] == old["identity"]
+                    and all(
+                        new[field] == old[field]
+                        for field in (
+                            "backup_path",
+                            "candidate_path",
+                            "final_path",
+                            "prior_identity",
+                        )
+                    )
+                )
+        return (
+            previous["phase"] == "building"
+            and candidate["phase"] == "discarded"
+            and previous["primary"] == candidate["primary"]
+            and previous["evidence"] == candidate["evidence"]
+            and previous["digest"] == candidate["digest"] is None
+            and previous["publication_index"]
+            == candidate["publication_index"] == 0
+            and previous["pending_action"] is None
+            and candidate["pending_action"] is None
+            and candidate["primary"]["stage"] == "removed"
+            and candidate["evidence"]["stage"] == "removed"
+        )
+
     def _validate_pending_x_transition(self, previous, candidate):
         allowed = {
             "unexamined": {
@@ -2572,6 +4187,7 @@ class MountSession:
         expected = {
             "artifacts",
             "directories",
+            "external",
             "mounts",
             "owner",
             "phase",
@@ -2628,6 +4244,10 @@ class MountSession:
             state["directories"],
             state["mounts"],
             state["artifacts"],
+        )
+        self._validate_external_record(
+            state["external"],
+            state["owner"]["token"],
         )
         self._validate_x_record(state["x"])
 
@@ -2952,6 +4572,246 @@ class MountSession:
                 raise MountRecoveryError(
                     "Active artifact identity is missing"
                 )
+
+    def _validate_external_record(self, record, token):
+        if record is None:
+            return
+        if (
+            not isinstance(record, dict)
+            or set(record)
+            != {
+                "digest",
+                "evidence",
+                "pending_action",
+                "phase",
+                "primary",
+                "publication_index",
+                "purpose",
+                "root",
+                "root_identity",
+            }
+            or record["phase"] not in _EXTERNAL_PHASES
+            or not isinstance(record["purpose"], str)
+            or not record["purpose"]
+            or not record["purpose"].replace("-", "").isalnum()
+            or record["root"] != self.work_root
+            or type(record["publication_index"]) is not int
+            or record["publication_index"] < 0
+            or record["publication_index"]
+            > len(_EXTERNAL_PUBLICATION_ACTIONS)
+            or (
+                record["pending_action"] is not None
+                and (
+                    type(record["pending_action"]) is not int
+                    or record["pending_action"]
+                    != record["publication_index"]
+                    or record["pending_action"]
+                    >= len(_EXTERNAL_PUBLICATION_ACTIONS)
+                )
+            )
+            or (
+                record["digest"] is not None
+                and not self._is_hex(record["digest"], 64)
+            )
+        ):
+            raise MountRecoveryError(
+                "External publication metadata is invalid"
+            )
+        self._validate_directory_identity(
+            record["root_identity"]
+        )
+        paths = set()
+        for role, stages in (
+            ("primary", _EXTERNAL_PRIMARY_STAGES),
+            ("evidence", _EXTERNAL_EVIDENCE_STAGES),
+        ):
+            slot = record[role]
+            if (
+                not isinstance(slot, dict)
+                or set(slot)
+                != {
+                    "backup_path",
+                    "candidate_path",
+                    "final_path",
+                    "identity",
+                    "prior_identity",
+                    "stage",
+                }
+                or slot["stage"] not in stages
+            ):
+                raise MountRecoveryError(
+                    "External artifact slot metadata is invalid"
+                )
+            self._validate_external_final_path(
+                slot["final_path"]
+            )
+            for field in ("candidate_path", "backup_path"):
+                self._validate_external_auxiliary_path(
+                    slot[field],
+                    token,
+                )
+            for field in (
+                "final_path",
+                "candidate_path",
+                "backup_path",
+            ):
+                if slot[field] in paths:
+                    raise MountRecoveryError(
+                        "External artifact paths are duplicated"
+                    )
+                paths.add(slot[field])
+            if slot["identity"] is not None:
+                self._validate_file_identity(slot["identity"])
+            if slot["prior_identity"] is not None:
+                self._validate_file_identity(
+                    slot["prior_identity"]
+                )
+        primary = record["primary"]
+        evidence = record["evidence"]
+        prefix = _EXTERNAL_NAMESPACE_PREFIX + token + "-"
+        primary_candidate_name = os.path.basename(
+            primary["candidate_path"]
+        )
+        primary_suffix = "-primary.candidate"
+        nonce = (
+            primary_candidate_name[
+                len(prefix):-len(primary_suffix)
+            ]
+            if (
+                primary_candidate_name.startswith(prefix)
+                and primary_candidate_name.endswith(
+                    primary_suffix
+                )
+            )
+            else ""
+        )
+        expected_names = {
+            "primary_candidate": (
+                prefix + nonce + "-primary.candidate"
+            ),
+            "primary_backup": (
+                prefix + nonce + "-primary.prior"
+            ),
+            "evidence_candidate": (
+                prefix + nonce + "-evidence.candidate"
+            ),
+            "evidence_backup": (
+                prefix + nonce + "-evidence.prior"
+            ),
+        }
+        if (
+            not self._is_hex(nonce, 32)
+            or os.path.basename(primary["candidate_path"])
+            != expected_names["primary_candidate"]
+            or os.path.basename(primary["backup_path"])
+            != expected_names["primary_backup"]
+            or os.path.basename(evidence["candidate_path"])
+            != expected_names["evidence_candidate"]
+            or os.path.basename(evidence["backup_path"])
+            != expected_names["evidence_backup"]
+        ):
+            raise MountRecoveryError(
+                "External artifact namespace relation is invalid"
+            )
+        if (
+            (primary["prior_identity"] is None)
+            != (evidence["prior_identity"] is None)
+        ):
+            raise MountRecoveryError(
+                "External prior publication pair is incomplete"
+            )
+        if (
+            primary["stage"] == "planned"
+            and primary["identity"] is not None
+        ) or (
+            primary["stage"]
+            in _EXTERNAL_PRIMARY_STAGES - {"planned", "removed"}
+            and primary["identity"] is None
+        ) or (
+            evidence["stage"] == "planned"
+            and evidence["identity"] is not None
+        ) or (
+            evidence["stage"]
+            in _EXTERNAL_EVIDENCE_STAGES - {"planned", "removed"}
+            and evidence["identity"] is None
+        ):
+            raise MountRecoveryError(
+                "External artifact identity stage is invalid"
+            )
+        if (
+            record["digest"] is not None
+            and (
+                primary["identity"] is None
+                or record["digest"]
+                != primary["identity"]["sha256"]
+            )
+        ):
+            raise MountRecoveryError(
+                "External digest is not tied to primary identity"
+            )
+        phase = record["phase"]
+        index = record["publication_index"]
+        if phase == "building":
+            valid = (
+                index == 0
+                and record["pending_action"] is None
+                and record["digest"] is None
+                and primary["stage"]
+                != "sealed"
+                and evidence["stage"] in {"planned", "removed"}
+            )
+        elif phase == "sealed":
+            valid = (
+                index == 0
+                and record["pending_action"] is None
+                and primary["stage"] == "sealed"
+                and evidence["stage"] in {"planned", "writing"}
+            )
+        elif phase == "ready":
+            valid = (
+                index == 0
+                and record["pending_action"] is None
+                and self._is_hex(record["digest"], 64)
+                and primary["stage"] == "sealed"
+                and evidence["stage"] == "ready"
+            )
+        elif phase == "publishing":
+            valid = (
+                0 <= index < 4
+                and self._is_hex(record["digest"], 64)
+                and primary["stage"] == "sealed"
+                and evidence["stage"] == "ready"
+            )
+        elif phase == "published":
+            valid = (
+                4 <= index < len(
+                    _EXTERNAL_PUBLICATION_ACTIONS
+                )
+                and self._is_hex(record["digest"], 64)
+                and primary["stage"] == "sealed"
+                and evidence["stage"] == "ready"
+            )
+        elif phase == "complete":
+            valid = (
+                index == len(_EXTERNAL_PUBLICATION_ACTIONS)
+                and record["pending_action"] is None
+                and self._is_hex(record["digest"], 64)
+                and primary["stage"] == "sealed"
+                and evidence["stage"] == "ready"
+            )
+        else:
+            valid = (
+                phase == "discarded"
+                and index == 0
+                and record["pending_action"] is None
+                and record["digest"] is None
+                and primary["stage"] == "removed"
+                and evidence["stage"] == "removed"
+            )
+        if not valid:
+            raise MountRecoveryError(
+                "External publication phase is inconsistent"
+            )
 
     def _validate_x_record(self, record):
         if (

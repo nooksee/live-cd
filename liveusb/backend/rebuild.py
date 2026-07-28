@@ -4,7 +4,9 @@ import glob
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
+import tempfile
 from datetime import date
 
 from . import mounts, chroot, mount_session, run
@@ -50,22 +52,52 @@ def _media_references_vmlinuz_efi(root):
     return False
 
 
-def _compression_is_supported(compression, probe=None):
-    """Determine compressor support without creating an image."""
+def _compression_is_supported(
+    compression,
+    probe=None,
+    scratch_root=None,
+):
+    """Determine compressor support with one bounded synthetic image."""
     if not isinstance(compression, str) or not compression:
         return False
     selected_probe = subprocess.run if probe is None else probe
     try:
-        result = selected_probe(
-            ["mksquashfs", "-help-comp", compression],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        with tempfile.TemporaryDirectory(
+            prefix=".liveusb-compression-probe-",
+            dir=scratch_root,
+        ) as probe_root:
+            source = os.path.join(probe_root, "empty-source")
+            output = os.path.join(probe_root, "probe.squashfs")
+            os.mkdir(source, 0o700)
+            result = selected_probe(
+                [
+                    "mksquashfs",
+                    source,
+                    output,
+                    "-comp",
+                    compression,
+                    "-processors",
+                    "1",
+                    "-no-progress",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if getattr(result, "returncode", 1) != 0:
+                return False
+            try:
+                output_state = os.lstat(output)
+            except FileNotFoundError:
+                return False
+            return (
+                stat.S_ISREG(output_state.st_mode)
+                and not stat.S_ISLNK(output_state.st_mode)
+                and output_state.st_nlink == 1
+            )
     except Exception as error:
         raise messages.LiveUSBError(
             "Unable to inspect mksquashfs compression capability"
         ) from error
-    return getattr(result, "returncode", 1) == 0
 
 
 def _plan_mksquashfs_command(ctx, output_path, probe=None):
@@ -77,7 +109,11 @@ def _plan_mksquashfs_command(ctx, output_path, probe=None):
         "-ef",
         constants.EXCLUDE_FILE,
     ]
-    if _compression_is_supported(ctx.compression, probe=probe):
+    if _compression_is_supported(
+        ctx.compression,
+        probe=probe,
+        scratch_root=ctx.work_dir,
+    ):
         command.extend(("-comp", ctx.compression))
     else:
         messages.warning(
@@ -107,28 +143,54 @@ def _build_squashfs(ctx, output_path, probe=None, runner=None):
     return command
 
 
+def _literal_media_node(root, relative_path, node_type):
+    root = os.path.abspath(root)
+    if (
+        os.path.normpath(root) != root
+        or os.path.realpath(root) != root
+    ):
+        return False
+    cursor = root
+    try:
+        root_state = os.lstat(root)
+        if (
+            not stat.S_ISDIR(root_state.st_mode)
+            or stat.S_ISLNK(root_state.st_mode)
+        ):
+            return False
+        parts = relative_path.split(os.sep)
+        for index, part in enumerate(parts):
+            if not part or part in {".", ".."}:
+                return False
+            cursor = os.path.join(cursor, part)
+            state = os.lstat(cursor)
+            final = index == len(parts) - 1
+            if stat.S_ISLNK(state.st_mode):
+                return False
+            if not final and not stat.S_ISDIR(state.st_mode):
+                return False
+        if os.path.realpath(cursor) != cursor:
+            return False
+        if node_type == "directory":
+            return stat.S_ISDIR(state.st_mode)
+        if node_type == "file":
+            return stat.S_ISREG(state.st_mode)
+    except OSError:
+        return False
+    return False
+
+
 def _legacy_media_profile(ctx):
-    return all((
-        os.path.isdir(os.path.join(ctx.iso_dir, "isolinux")),
-        os.path.isfile(
-            os.path.join(ctx.iso_dir, "isolinux", "isolinux.bin")
-        ),
-        os.path.isdir(os.path.join(ctx.iso_dir, "casper")),
-        os.path.isdir(os.path.join(ctx.iso_dir, ".disk")),
-    ))
-
-
-def _remove_stale_outputs(paths):
-    for path in paths:
-        if not os.path.lexists(path):
-            continue
-        messages.extra_info("Purging", path)
-        try:
-            os.remove(path)
-        except OSError as error:
-            raise messages.LiveUSBError(
-                f"Unable to delete stale rebuild output: {path}"
-            ) from error
+    requirements = (
+        ("isolinux", "directory"),
+        (os.path.join("isolinux", "isolinux.bin"), "file"),
+        ("casper", "directory"),
+        (".disk", "directory"),
+    )
+    return all(
+        _literal_media_node(ctx.iso_dir, path, node_type)
+        for path, node_type in requirements
+    )
 
 
 def _sha256_file(path):
@@ -147,75 +209,96 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
-def _sha256_temporary_path(sidecar_path):
-    return sidecar_path + ".tmp"
-
-
-def _close_quietly(descriptor):
-    if descriptor is None:
-        return
-    try:
-        os.close(descriptor)
-    except OSError:
-        pass
-
-
-def _remove_quietly(path):
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        pass
-
-
-def _publish_sha256(iso_path, sidecar_path):
-    """Publish one complete sidecar through an atomic replacement."""
-    digest = _sha256_file(iso_path)
-    temporary_path = _sha256_temporary_path(sidecar_path)
-    descriptor = None
-    try:
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(temporary_path, flags, 0o644)
-        payload = f"{digest}  {iso_path}\n".encode("utf-8")
-        offset = 0
-        while offset < len(payload):
-            written = os.write(descriptor, payload[offset:])
-            if written <= 0:
-                raise OSError("short SHA-256 sidecar write")
-            offset += written
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
-        os.replace(temporary_path, sidecar_path)
-        directory_descriptor = os.open(
-            os.path.dirname(sidecar_path),
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+def _sidecar_payload(digest, iso_path):
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in digest
         )
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-    except Exception as error:
-        _close_quietly(descriptor)
-        _remove_quietly(temporary_path)
-        _remove_quietly(sidecar_path)
+    ):
         raise messages.LiveUSBError(
-            "Unable to publish final ISO SHA-256 evidence"
+            "Final ISO SHA-256 digest is invalid"
+        )
+    return (
+        f"{digest}  {os.path.basename(iso_path)}\n"
+    ).encode("ascii")
+
+
+def _require_regular_artifact(path):
+    try:
+        state = os.lstat(path)
+    except OSError as error:
+        raise messages.LiveUSBError(
+            f"Final publication artifact is unavailable: {path}"
         ) from error
+    if (
+        not stat.S_ISREG(state.st_mode)
+        or stat.S_ISLNK(state.st_mode)
+        or state.st_nlink != 1
+    ):
+        raise messages.LiveUSBError(
+            f"Final publication artifact is unsafe: {path}"
+        )
+    return state
+
+
+def _validate_sha256_pair(iso_path, sidecar_path):
+    iso_state = _require_regular_artifact(iso_path)
+    _require_regular_artifact(sidecar_path)
+    if stat.S_IMODE(iso_state.st_mode) != 0o555:
+        raise messages.LiveUSBError(
+            "Final ISO is not sealed read-only"
+        )
+    digest = _sha256_file(iso_path)
+    expected = _sidecar_payload(digest, iso_path)
+    try:
+        with open(sidecar_path, "rb") as handle:
+            actual = handle.read()
+    except OSError as error:
+        raise messages.LiveUSBError(
+            "Unable to read final ISO SHA-256 evidence"
+        ) from error
+    if actual != expected:
+        raise messages.LiveUSBError(
+            "Final ISO SHA-256 evidence does not match"
+        )
     return digest
 
 
-def _finalize_legacy_iso(ctx, iso_path, sidecar_path, runner=None):
+def _validate_prior_pair(iso_path, sidecar_path):
+    iso_exists = os.path.lexists(iso_path)
+    sidecar_exists = os.path.lexists(sidecar_path)
+    if not iso_exists and not sidecar_exists:
+        return None
+    if iso_exists != sidecar_exists:
+        raise messages.LiveUSBError(
+            "Prior final ISO publication pair is incomplete"
+        )
+    return _validate_sha256_pair(iso_path, sidecar_path)
+
+
+def _apply_legacy_hybrid_mutation(
+    ctx,
+    session,
+    runner=None,
+    locator=None,
+):
     if not _legacy_media_profile(ctx):
         raise messages.LiveUSBError(
             "ISO finalization requires the accepted legacy-media profile"
         )
     selected_runner = run if runner is None else runner
+    selected_locator = shutil.which if locator is None else locator
+    isohybrid_path = selected_locator("isohybrid")
+    if isohybrid_path is None:
+        raise messages.LiveUSBError(
+            "Required legacy finalization tool is unavailable: isohybrid"
+        )
+    iso_path = session.begin_external_primary_mutation()
     try:
-        result = selected_runner(["isohybrid", iso_path])
+        result = selected_runner([isohybrid_path, iso_path])
     except Exception as error:
         raise messages.LiveUSBError(
             "Unable to apply legacy hybrid ISO mutation"
@@ -224,18 +307,289 @@ def _finalize_legacy_iso(ctx, iso_path, sidecar_path, runner=None):
         raise messages.LiveUSBError(
             "Unable to apply legacy hybrid ISO mutation"
         )
+    session.finish_external_primary_mutation()
+    return session.seal_external_primary()
+
+
+def _finish_external_publication(
+    session,
+    iso_path,
+    sidecar_path,
+):
+    view = session.external_publication_view(
+        iso_path,
+        sidecar_path,
+        "final-image",
+    )
+    if view["phase"] == "complete":
+        digest = _validate_sha256_pair(
+            view["primary_final"],
+            view["evidence_final"],
+        )
+        if view["digest"] != digest:
+            raise messages.LiveUSBError(
+                "Recovered completed publication digest changed"
+            )
+        return session.acknowledge_external_publication()
+    if view["phase"] == "sealed":
+        candidate_path = view["primary_candidate"]
+        digest = _sha256_file(candidate_path)
+        if view["digest"] is None:
+            session.record_external_digest(digest)
+        elif view["digest"] != digest:
+            raise messages.LiveUSBError(
+                "Recovered final ISO candidate digest changed"
+            )
+        view = session.external_publication_view(
+            iso_path,
+            sidecar_path,
+            "final-image",
+        )
+        if view["evidence_stage"] == "planned":
+            session.write_external_evidence(
+                _sidecar_payload(digest, iso_path)
+            )
+    return session.publish_external_pair(
+        validator=_validate_sha256_pair,
+    )
+
+
+def _build_locked_final_image_steps(
+    ctx,
+    session,
+    dist,
+    arch,
+    version,
+    codename,
+    disk_dir,
+    casper_dir,
+    iso_path,
+    sha256_path,
+):
+    _validate_prior_pair(iso_path, sha256_path)
+    publication = session.begin_external_publication(
+        iso_path,
+        sha256_path,
+        "final-image",
+    )
+
+    messages.info("Creating squashed FileSystem")
+    squashfs_path = os.path.join(
+        casper_dir,
+        "filesystem.squashfs",
+    )
+    _build_squashfs(ctx, squashfs_path)
+
+    messages.info("Checking FileSystem size")
+    fs_size = os.path.getsize(squashfs_path)
+    if fs_size > 4_000_000_000:
+        messages.error(
+            "The squashed FileSystem size is greater than "
+            "4 gigabytes!"
+        )
+
+    messages.info("Creating filesystem.size")
+    with open(
+        os.path.join(casper_dir, "filesystem.size"),
+        "w",
+    ) as fh:
+        fh.write(f"{fs_size}\n")
+
+    messages.info("Creating filesystem.manifest")
+    manifest_result = subprocess.run(
+        [
+            "chroot",
+            ctx.fs_dir,
+            "dpkg-query",
+            "-W",
+            "--showformat=${Package} ${Version}\n",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    if manifest_result.returncode != 0:
+        messages.error(
+            "Unable to create the filesystem.manifest!"
+        )
+    manifest_path = os.path.join(
+        casper_dir,
+        "filesystem.manifest",
+    )
+    with open(manifest_path, "w") as fh:
+        fh.write(manifest_result.stdout)
+
+    messages.info("Creating filesystem.manifest-desktop")
+    manifest_desktop_path = os.path.join(
+        casper_dir,
+        "filesystem.manifest-desktop",
+    )
+    shutil.copyfile(manifest_path, manifest_desktop_path)
+    exclude_pkgs = (
+        "ubiquity",
+        "casper",
+        "live-initramfs",
+        "user-setup",
+        "discover1",
+        "xresprobe",
+        "libdebian-installer4",
+    )
+    with open(manifest_desktop_path) as fh:
+        lines = [
+            line
+            for line in fh
+            if not any(pkg in line for pkg in exclude_pkgs)
+        ]
+    with open(manifest_desktop_path, "w") as fh:
+        fh.writelines(lines)
+
+    messages.info("Creating README.diskdefines")
+    with open(
+        os.path.join(ctx.iso_dir, "README.diskdefines"),
+        "w",
+    ) as fh:
+        fh.write(
+            f"#define DISKNAME  {dist} {version} "
+            f"\"{codename}\" - Release {arch}\n"
+            "#define TYPE  binary\n"
+            "#define TYPEbinary  1\n"
+            f"#define ARCH  {arch}\n"
+            f"#define ARCH{arch}  1\n"
+            "#define DISKNUM  1\n"
+            "#define DISKNUM1  1\n"
+            "#define TOTALNUM  0\n"
+            "#define TOTALNUM0  1\n"
+        )
+
+    messages.info("Creating disk info")
+    today = date.today().strftime("%Y%m%d")
+    with open(os.path.join(disk_dir, "info"), "w") as fh:
+        fh.write(
+            f'{dist} {version} "{codename}" - '
+            f"Release {arch} ({today})\n"
+        )
+
+    messages.info("Creating MD5Sum")
+    md5sum_path = os.path.join(ctx.iso_dir, "md5sum.txt")
+    _write_md5sums(ctx.iso_dir, md5sum_path)
+
+    messages.info("Creating image file")
+    candidate_path = session.begin_external_primary_write()
     try:
-        os.chmod(iso_path, 0o555)
+        genisoimage_result = run(
+            [
+                "genisoimage",
+                "-r",
+                "-V",
+                f"{dist}-{arch}-{version}",
+                "-b",
+                "isolinux/isolinux.bin",
+                "-c",
+                "isolinux/boot.cat",
+                "-cache-inodes",
+                "-J",
+                "-l",
+                "-no-emul-boot",
+                "-boot-load-size",
+                "4",
+                "-boot-info-table",
+                "-o",
+                candidate_path,
+                "-input-charset",
+                "utf-8",
+                ".",
+            ],
+            cwd=ctx.iso_dir,
+        )
     except Exception as error:
         raise messages.LiveUSBError(
-            "Unable to seal the finalized ISO read-only"
+            "Unable to execute genisoimage"
         ) from error
-    return _publish_sha256(iso_path, sidecar_path)
+    if getattr(genisoimage_result, "returncode", 1) != 0:
+        raise messages.LiveUSBError("Unable to create image file")
+    session.finish_external_primary_write()
+
+    _apply_legacy_hybrid_mutation(ctx, session)
+    digest = _sha256_file(publication["primary_candidate"])
+    session.record_external_digest(digest)
+    session.write_external_evidence(
+        _sidecar_payload(digest, iso_path)
+    )
+    return session.publish_external_pair(
+        validator=_validate_sha256_pair,
+    )
+
+
+def _build_locked_final_image(
+    ctx,
+    session,
+    dist,
+    arch,
+    version,
+    codename,
+    disk_dir,
+    casper_dir,
+    iso_path,
+    sha256_path,
+):
+    try:
+        return _build_locked_final_image_steps(
+            ctx,
+            session,
+            dist,
+            arch,
+            version,
+            codename,
+            disk_dir,
+            casper_dir,
+            iso_path,
+            sha256_path,
+        )
+    except messages.LiveUSBError:
+        raise
+    except Exception as error:
+        raise messages.LiveUSBError(
+            "Unable to complete the final image transaction"
+        ) from error
+
+
+def _report_rebuild_success():
+    messages.info(
+        "Distribution rebuild completed. Use 'exit' to quit properly."
+    )
+    if shutil.which("zenity"):
+        subprocess.run(
+            [
+                "zenity",
+                "--info",
+                "--window-icon=info",
+                "--text",
+                "Distribution rebuild completed. "
+                "Use 'exit' to quit properly.",
+            ]
+        )
 
 
 def run_rebuild(ctx):
     mounts.check_fs_dir(ctx)
     mounts.check_lock(ctx)
+    with mount_session.MountSession(ctx) as recovery_session:
+        if recovery_session.has_external_publication:
+            recovered = (
+                recovery_session.current_external_publication()
+            )
+            if recovered["purpose"] != "final-image":
+                raise messages.LiveUSBError(
+                    "Recovered external publication purpose "
+                    "is not a final image"
+                )
+            _finish_external_publication(
+                recovery_session,
+                recovered["primary_final"],
+                recovered["evidence_final"],
+            )
+            _report_rebuild_success()
+            return
+
     chroot.update_distro_name(ctx)
     chroot.check_sources_list()
 
@@ -314,11 +668,6 @@ def run_rebuild(ctx):
         ctx.work_dir,
         f"{dist}-{arch}-{version}.sha256",
     )
-    _remove_stale_outputs((
-        iso_path,
-        sha256_path,
-        _sha256_temporary_path(sha256_path),
-    ))
     to_clean = [
         os.path.join(casper_dir, "filesystem.squashfs"),
         os.path.join(casper_dir, "initrd.lz"),
@@ -410,95 +759,20 @@ def run_rebuild(ctx):
                 except OSError:
                     pass
 
-    messages.info("Creating squashed FileSystem")
-    squashfs_path = os.path.join(casper_dir, "filesystem.squashfs")
-    _build_squashfs(ctx, squashfs_path)
-
-    messages.info("Checking FileSystem size")
-    fs_size = os.path.getsize(squashfs_path)
-    if fs_size > 4_000_000_000:
-        messages.error("The squashed FileSystem size is greater than 4 gigabytes!")
-
-    messages.info("Creating filesystem.size")
-    with open(os.path.join(casper_dir, "filesystem.size"), "w") as fh:
-        fh.write(f"{fs_size}\n")
-
-    messages.info("Creating filesystem.manifest")
-    manifest_result = subprocess.run(
-        ["chroot", ctx.fs_dir, "dpkg-query", "-W", "--showformat=${Package} ${Version}\n"],
-        stdout=subprocess.PIPE,
-        text=True,
-    )
-    if manifest_result.returncode != 0:
-        messages.error("Unable to create the filesystem.manifest!")
-    manifest_path = os.path.join(casper_dir, "filesystem.manifest")
-    with open(manifest_path, "w") as fh:
-        fh.write(manifest_result.stdout)
-
-    messages.info("Creating filesystem.manifest-desktop")
-    manifest_desktop_path = os.path.join(casper_dir, "filesystem.manifest-desktop")
-    shutil.copyfile(manifest_path, manifest_desktop_path)
-    exclude_pkgs = ("ubiquity", "casper", "live-initramfs", "user-setup", "discover1", "xresprobe", "libdebian-installer4")
-    with open(manifest_desktop_path) as fh:
-        lines = [line for line in fh if not any(pkg in line for pkg in exclude_pkgs)]
-    with open(manifest_desktop_path, "w") as fh:
-        fh.writelines(lines)
-
-    messages.info("Creating README.diskdefines")
-    with open(os.path.join(ctx.iso_dir, "README.diskdefines"), "w") as fh:
-        fh.write(
-            f"#define DISKNAME  {dist} {version} \"{codename}\" - Release {arch}\n"
-            "#define TYPE  binary\n"
-            "#define TYPEbinary  1\n"
-            f"#define ARCH  {arch}\n"
-            f"#define ARCH{arch}  1\n"
-            "#define DISKNUM  1\n"
-            "#define DISKNUM1  1\n"
-            "#define TOTALNUM  0\n"
-            "#define TOTALNUM0  1\n"
+    with mount_session.MountSession(ctx) as final_session:
+        _build_locked_final_image(
+            ctx,
+            final_session,
+            dist,
+            arch,
+            version,
+            codename,
+            disk_dir,
+            casper_dir,
+            iso_path,
+            sha256_path,
         )
-
-    messages.info("Creating disk info")
-    today = date.today().strftime("%Y%m%d")
-    with open(os.path.join(disk_dir, "info"), "w") as fh:
-        fh.write(f'{dist} {version} "{codename}" - Release {arch} ({today})\n')
-
-    messages.info("Creating MD5Sum")
-    md5sum_path = os.path.join(ctx.iso_dir, "md5sum.txt")
-    _write_md5sums(ctx.iso_dir, md5sum_path)
-
-    messages.info("Creating image file")
-    try:
-        genisoimage_result = run([
-            "genisoimage",
-            "-r",
-            "-V", f"{dist}-{arch}-{version}",
-            "-b", "isolinux/isolinux.bin",
-            "-c", "isolinux/boot.cat",
-            "-cache-inodes",
-            "-J",
-            "-l",
-            "-no-emul-boot",
-            "-boot-load-size", "4",
-            "-boot-info-table",
-            "-o", iso_path,
-            "-input-charset", "utf-8",
-            ".",
-        ], cwd=ctx.iso_dir)
-    except Exception as error:
-        raise messages.LiveUSBError(
-            "Unable to execute genisoimage"
-        ) from error
-    if getattr(genisoimage_result, "returncode", 1) != 0:
-        raise messages.LiveUSBError("Unable to create image file")
-
-    _finalize_legacy_iso(ctx, iso_path, sha256_path)
-    messages.info("Distribution rebuild completed. Use 'exit' to quit properly.")
-    if shutil.which("zenity"):
-        subprocess.run([
-            "zenity", "--info", "--window-icon=info",
-            "--text", "Distribution rebuild completed. Use 'exit' to quit properly.",
-        ])
+    _report_rebuild_success()
 
 
 def _walk_files(root):

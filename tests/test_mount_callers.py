@@ -35,6 +35,10 @@ class _RecordingSession:
         self.events.append("enter")
         return self
 
+    @property
+    def has_external_publication(self):
+        return False
+
     def __exit__(self, exception_type, _error, _traceback):
         if exception_type is None:
             exception_name = None
@@ -468,9 +472,21 @@ class MountCallerTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["enter", "mount_sys", ("exit", "RuntimeError")],
+            [
+                "enter",
+                ("exit", None),
+                "enter",
+                "mount_sys",
+                ("exit", "RuntimeError"),
+            ],
         )
-        session_factory.assert_called_once_with(self.context)
+        self.assertEqual(session_factory.call_count, 2)
+        session_factory.assert_has_calls(
+            [
+                mock.call(self.context),
+                mock.call(self.context),
+            ]
+        )
 
     def test_xnest_releases_session_and_process_after_command_failure(self):
         session_directory = (

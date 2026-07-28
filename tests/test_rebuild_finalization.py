@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -223,10 +224,6 @@ class RebuildFinalizationTests(unittest.TestCase):
 
         self.assertEqual(len(commands), 1)
 
-    @unittest.skipUnless(
-        os.environ.get("LIVEUSB_REAL_PROBE_TEST") == "1",
-        "real bounded compressor probe is an explicit gate",
-    )
     def test_t03_real_squashfs_capability_probe(self):
         if shutil.which("mksquashfs") is None:
             self.skipTest("mksquashfs is unavailable")
@@ -1048,24 +1045,41 @@ class RebuildFinalizationTests(unittest.TestCase):
         self.assertTrue(candidate.exists())
 
     def test_nonregular_prior_output_fails_before_mutation(self):
-        for node_type in ("directory", "symlink", "fifo"):
+        for node_type in (
+            "directory",
+            "symlink",
+            "fifo",
+            "hardlink",
+        ):
             with self.subTest(node_type=node_type):
                 fixture = self.root / f"unsafe-{node_type}"
                 fixture.mkdir()
                 fixture.chmod(0o700)
                 self._configure_fixture(fixture)
+                hardlink_source = None
                 if node_type == "directory":
                     self.iso_path.mkdir()
                 elif node_type == "symlink":
                     target = self.work / "target"
                     target.write_bytes(b"target")
                     self.iso_path.symlink_to(target)
-                else:
+                elif node_type == "fifo":
                     os.mkfifo(self.iso_path)
-                self.sidecar_path.write_text(
-                    "not valid\n",
-                    encoding="utf-8",
-                )
+                else:
+                    hardlink_source = (
+                        self.work / "hardlink-source.iso"
+                    )
+                    hardlink_source.write_bytes(
+                        b"task-owned hard-linked ISO"
+                    )
+                    os.link(hardlink_source, self.iso_path)
+                sidecar_payload = b"not valid\n"
+                self.sidecar_path.write_bytes(sidecar_payload)
+                sidecar_before = os.stat(self.sidecar_path)
+                if hardlink_source is not None:
+                    source_before = os.stat(hardlink_source)
+                    iso_before = os.stat(self.iso_path)
+                    payload_before = hardlink_source.read_bytes()
 
                 with self.assertRaises(
                     mount_session.MountRecoveryError
@@ -1081,6 +1095,81 @@ class RebuildFinalizationTests(unittest.TestCase):
 
                 self.assertTrue(os.path.lexists(self.iso_path))
                 self.assertTrue(self.sidecar_path.exists())
+                self.assertEqual(
+                    self.sidecar_path.read_bytes(),
+                    sidecar_payload,
+                )
+                sidecar_after = os.stat(self.sidecar_path)
+                self.assertEqual(
+                    (
+                        sidecar_after.st_dev,
+                        sidecar_after.st_ino,
+                        sidecar_after.st_mode,
+                        sidecar_after.st_nlink,
+                        sidecar_after.st_size,
+                    ),
+                    (
+                        sidecar_before.st_dev,
+                        sidecar_before.st_ino,
+                        sidecar_before.st_mode,
+                        sidecar_before.st_nlink,
+                        sidecar_before.st_size,
+                    ),
+                )
+                if hardlink_source is not None:
+                    source_after = os.stat(hardlink_source)
+                    iso_after = os.stat(self.iso_path)
+                    self.assertEqual(
+                        hardlink_source.read_bytes(),
+                        payload_before,
+                    )
+                    self.assertEqual(
+                        self.iso_path.read_bytes(),
+                        payload_before,
+                    )
+                    self.assertEqual(
+                        (
+                            source_after.st_dev,
+                            source_after.st_ino,
+                            source_after.st_mode,
+                            source_after.st_nlink,
+                            source_after.st_size,
+                        ),
+                        (
+                            source_before.st_dev,
+                            source_before.st_ino,
+                            source_before.st_mode,
+                            source_before.st_nlink,
+                            source_before.st_size,
+                        ),
+                    )
+                    self.assertEqual(
+                        (
+                            iso_after.st_dev,
+                            iso_after.st_ino,
+                            iso_after.st_mode,
+                            iso_after.st_nlink,
+                            iso_after.st_size,
+                        ),
+                        (
+                            iso_before.st_dev,
+                            iso_before.st_ino,
+                            iso_before.st_mode,
+                            iso_before.st_nlink,
+                            iso_before.st_size,
+                        ),
+                    )
+                    self.assertEqual(
+                        (
+                            source_after.st_dev,
+                            source_after.st_ino,
+                        ),
+                        (
+                            iso_after.st_dev,
+                            iso_after.st_ino,
+                        ),
+                    )
+                    self.assertEqual(source_after.st_nlink, 2)
                 self.assertFalse(
                     any(
                         path.name.startswith(
@@ -1089,6 +1178,25 @@ class RebuildFinalizationTests(unittest.TestCase):
                         for path in self.work.iterdir()
                     )
                 )
+                self._assert_no_publication_residue()
+                runtime = Path(self.ctx.runtime_dir)
+                lock_path = runtime / "operation.lock"
+                self.assertEqual(
+                    sorted(path.name for path in runtime.iterdir()),
+                    ["operation.lock"],
+                )
+                descriptor = os.open(lock_path, os.O_RDWR)
+                try:
+                    fcntl.flock(
+                        descriptor,
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    )
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)
+                lock_path.unlink()
+                runtime.rmdir()
+                self.assertFalse(runtime.exists())
 
     def test_legacy_profile_rejects_symlinked_required_nodes(self):
         real = self.iso_tree / "real-isolinux.bin"

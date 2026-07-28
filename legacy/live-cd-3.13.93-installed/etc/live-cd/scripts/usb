@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+
+# LiveCD Creator 3
+# Copyright (C) 2012-2016  Kevin Atwood
+# 
+# Customizer - Advanced LiveCD Remastering Tool
+# Copyright (C) 2010-2013  Ivailo Monev
+# 
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+set -u
+source /etc/live-cd/common
+source /etc/live-cd/default
+
+INFO_MESSAGE "Retrieving distribution info"
+ARCH=`chroot "$WORK_DIR/FileSystem" dpkg --print-architecture` || ZENITY_ERROR "Unable to chroot and get architecture of distribution FileSystem!"
+DIST=`grep DISTRIB_ID= "$WORK_DIR/FileSystem/etc/lsb-release" | sed 's/DISTRIB_ID=//;s/\"//g'` || ZENITY_ERROR "Unable to get distribution ID!"
+VERSION=`grep DISTRIB_RELEASE= "$WORK_DIR/FileSystem/etc/lsb-release" | sed 's/DISTRIB_RELEASE=//;s/\"//g'` || ZENITY_ERROR "Unable to get distribution version!"
+
+if [ ! -e "$WORK_DIR/$DIST-$ARCH-$VERSION.iso" ];then
+    ZENITY_ERROR "Image file does not exist!"
+else
+    EXTRA_INFO_MESSAGE "Running usb creator with image file" "$WORK_DIR/$DIST-$ARCH-$VERSION.iso"
+    if [ -e /usr/bin/usb-creator-gtk ]; then
+        usb-creator-gtk -i "$WORK_DIR/$DIST-$ARCH-$VERSION.iso" || ZENITY_ERROR "An error occurred while loading image file!"
+    else
+        usb-creator-kde -i "$WORK_DIR/$DIST-$ARCH-$VERSION.iso" || ZENITY_ERROR "An error occurred while loading image file!"
+    fi
+fi
+
+## EOF

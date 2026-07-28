@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+
+# LiveCD Creator 3
+# Copyright (C) 2012-2016  Kevin Atwood
+# 
+# Customizer - Advanced LiveCD Remastering Tool
+# Copyright (C) 2010-2013  Ivailo Monev
+# 
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+set -u
+source /etc/live-cd/common
+source /etc/live-cd/default
+
+__check_fs_dir__
+__check_lock__
+
+choise=$(zenity --title="Plymouth" --list --width=350 --height=230 --text="Which plymouth theme do you wish to install?" --column="Select" --column="Option" TRUE Ubuntu FALSE Lubuntu FALSE Xubuntu FALSE Kubuntu FALSE Example --radiolist)
+
+if [[ "$choise" =~ "Ubuntu" ]]; then
+    THEME_PACKAGES="xserver-xorg xinit plymouth-theme-ubuntu-logo"
+fi
+
+if [[ "$choise" =~ "Lubuntu" ]]; then
+    THEME_PACKAGES="xserver-xorg xinit plymouth-theme-lubuntu-logo plymouth-theme-lubuntu-text"
+fi
+
+if [[ "$choise" =~ "Xubuntu" ]]; then
+    THEME_PACKAGES="xserver-xorg xinit plymouth-theme-xubuntu-logo plymouth-theme-xubuntu-text"
+fi
+
+if [[ "$choise" =~ "Kubuntu" ]]; then
+    THEME_PACKAGES="xserver-xorg xinit plymouth-theme-kubuntu-logo plymouth-theme-kubuntu-text"
+fi
+
+if [[ "$choise" =~ "Example" ]]; then
+    THEME_PACKAGES="xserver-xorg xinit plymouth-theme-script"
+fi
+
+__mount_sys__
+__mount_dbus__
+__chroot__ apt-get install dbus -f -y
+__chroot__ dbus-uuidgen --ensure
+
+(
+    __chroot__ apt-get install -y ${THEME_PACKAGES}
+) | zenity --title="" --text="Installing $choise plymouth theme..." --progress --width=350 --pulsate --auto-close &
+
+# get zenity process id
+PID_ZENITY=${!}
+
+# get firstly created child process id, which is running all tasks
+PID_CHILD=$(pgrep -o -P $$)
+
+# loop to check that progress dialog has not been cancelled
+while [ "$PID_ZENITY" != "" ]
+do
+  # get PID of all running tasks
+  PID_TASKS=$(pgrep -d ' ' -P ${PID_CHILD})
+
+  # check if zenity PID is still there (dialog box still open)
+  PID_ZENITY=$(ps h -o pid --pid ${PID_ZENITY} | xargs)
+
+  # sleep for 2 second
+  sleep 2
+done
+
+# if some running tasks are still there, kill them
+[ "${PID_TASKS}" != "" ] && kill -9 ${PID_TASKS}
+
+if [ "$choise" = "Ubuntu" ];then
+    INFO_MESSAGE "Setting default plymouth theme"
+    __chroot__ update-alternatives --set default.plymouth /lib/plymouth/themes/ubuntu-logo/ubuntu-logo.plymouth
+fi
+
+if [ "$choise" = "Lubuntu" ];then
+    INFO_MESSAGE "Setting default plymouth theme"
+    __chroot__ update-alternatives --set default.plymouth /lib/plymouth/themes/lubuntu-logo/lubuntu-logo.plymouth
+fi
+
+if [ "$choise" = "Xubuntu" ];then
+    INFO_MESSAGE "Setting default plymouth theme"
+    __chroot__ update-alternatives --set default.plymouth /lib/plymouth/themes/xubuntu-logo/xubuntu-logo.plymouth
+fi
+
+if [ "$choise" = "Kubuntu" ];then
+    INFO_MESSAGE "Setting default plymouth theme"
+    __chroot__ update-alternatives --set default.plymouth /lib/plymouth/themes/kubuntu-logo/kubuntu-logo.plymouth
+fi
+
+if [ "$choise" = "Example" ];then
+    INFO_MESSAGE "Setting default plymouth theme"
+    __chroot__ update-alternatives --set default.plymouth /lib/plymouth/themes/script/script.plymouth
+fi
+
+__chroot__ update-initramfs -u
+__umount_sys__
+__recursive_umount__
+
+## EOF

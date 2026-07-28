@@ -1,0 +1,1 @@
+"""LiveUSB Creator characterization tests."""

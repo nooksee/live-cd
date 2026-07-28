@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+
+# LiveCD Creator 3
+# Copyright (C) 2012-2016  Kevin Atwood
+# 
+# Customizer - Advanced LiveCD Remastering Tool
+# Copyright (C) 2010-2013  Ivailo Monev
+# 
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+set -u
+source /etc/live-cd/common
+source /etc/live-cd/default
+
+__check_fs_dir__
+__check_lock__
+
+choise=$(zenity --title="Desktop Environment" --list --width=350 --height=230 --text="Which desktop environment do you wish to install?" --column="Select" --column="Option" TRUE Ubuntu FALSE Xubuntu FALSE Lubuntu FALSE Kubuntu --radiolist)
+
+if [[ "$choise" =~ "Ubuntu" ]]; then
+GUI_PACKAGES="xserver-xorg xinit ubuntu-desktop libwayland-egl1-mesa-lts-trusty gufw unity-control-center appmenu-qt5 hunspell-en-ca indicator-bluetooth indicator-datetime plymouth-theme-ubuntu-logo ttf-ubuntu-font-family indicator-sound telepathy-indicator ttf-dejavu indicator-power libcanberra-gtk-module sni-qt language-pack-en-base apturl ttf-wqy-microhei software-properties-common python-software-properties activity-log-manager-control-center colord ubuntu-restricted-extras network-manager-openvpn-gnome network-manager-gnome nautilus-open-terminal indicator-session indicator-printers indicator-messages indicator-appmenu indicator-application unity-lens-applications firefox unity-lens-files python-appindicator zeitgeist zeitgeist-core zeitgeist-datahub menu appmenu-qt python-mutagen"
+fi
+
+if [[ "$choise" =~ "Xubuntu" ]]; then
+GUI_PACKAGES="xserver-xorg xinit xubuntu-desktop xubuntu-restricted-extras xubuntu-wallpapers xubuntu-icon-theme plymouth-theme-xubuntu-logo plymouth-theme-xubuntu-text xul-ext-ubufox xfce4-goodies xfce4-indicator-plugin xfce4-mount-plugin firefox"
+fi
+
+if [[ "$choise" =~ "Lubuntu" ]]; then
+GUI_PACKAGES="xserver-xorg xinit lubuntu-desktop lubuntu-extra-sessions lubuntu-live-settings lubuntu-restricted-addons lubuntu-restricted-extras libgtk2-perl"
+fi
+
+if [[ "$choise" =~ "Kubuntu" ]]; then
+GUI_PACKAGES="xserver-xorg xinit lightdm kubuntu-desktop kubuntu-full kubuntu-settings-desktop kubuntu-default-settings kde-telepathy-contact-list plymouth-theme-kubuntu-text plymouth-theme-kubuntu-logo upower kubuntu-driver-manager kubuntu-restricted-addons kubuntu-restricted-extras kdeplasma-addons kate firefox amarok"
+fi
+
+__mount_sys__
+__mount_dbus__
+__chroot__ apt-get install dbus -f -y
+__chroot__ dbus-uuidgen --ensure
+
+(
+    __chroot__ apt-get install -y ${GUI_PACKAGES}
+    __chroot__ apt-get install -f -y
+) | zenity --title="" --text="Installing $choise desktop environment..." --progress --width=350 --pulsate --auto-close &
+
+# get zenity process id
+PID_ZENITY=${!}
+
+# get firstly created child process id, which is running all tasks
+PID_CHILD=$(pgrep -o -P $$)
+
+# loop to check that progress dialog has not been cancelled
+while [ "$PID_ZENITY" != "" ]
+do
+  # get PID of all running tasks
+  PID_TASKS=$(pgrep -d ' ' -P ${PID_CHILD})
+
+  # check if zenity PID is still there (dialog box still open)
+  PID_ZENITY=$(ps h -o pid --pid ${PID_ZENITY} | xargs)
+
+  # sleep for 2 second
+  sleep 2
+done
+
+# if some running tasks are still there, kill them
+[ "${PID_TASKS}" != "" ] && kill -9 ${PID_TASKS}
+
+if [[ "$choise" =~ "Xubuntu" ]]; then
+    INFO_MESSAGE "Copying changes to default user directory"
+    cp -ru /etc/live-cd/distribution/xubuntu/skel/* "$WORK_DIR/FileSystem/etc/skel" 2> /dev/null
+    cp -ru /etc/live-cd/distribution/xubuntu/skel/.??* "$WORK_DIR/FileSystem/etc/skel" 2> /dev/null
+    cp -ru /etc/live-cd/distribution/xubuntu/skel/* "$WORK_DIR/FileSystem/root/" 2> /dev/null
+    cp -ru /etc/live-cd/distribution/xubuntu/skel/.??* "$WORK_DIR/FileSystem/root/" 2> /dev/null
+fi
+
+if [[ "$choise" =~ "Ubuntu" ]]; then
+    INFO_MESSAGE "Copying changes to default user directory"
+    cp -ru /etc/live-cd/distribution/ubuntu/skel/* "$WORK_DIR/FileSystem/etc/skel" 2> /dev/null
+    cp -ru /etc/live-cd/distribution/ubuntu/skel/.??* "$WORK_DIR/FileSystem/etc/skel" 2> /dev/null
+    cp -ru /etc/live-cd/distribution/ubuntu/skel/* "$WORK_DIR/FileSystem/root/" 2> /dev/null
+    cp -ru /etc/live-cd/distribution/ubuntu/skel/.??* "$WORK_DIR/FileSystem/root/" 2> /dev/null
+fi
+
+__umount_sys__
+__recursive_umount__
+
+## EOF

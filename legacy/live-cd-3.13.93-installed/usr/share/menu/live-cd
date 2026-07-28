@@ -1,0 +1,4 @@
+?package(live-cd):needs="X11" section="Applications/System/Administration"\
+title="LiveCD Creator"\
+command="/usr/bin/live-cd"\
+icon="/usr/share/pixmaps/live-cd.xpm"

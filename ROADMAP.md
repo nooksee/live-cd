@@ -116,6 +116,18 @@ Accepted Phase 1D root-free baseline:
   rejected;
 - real privileged and product-image operation categories exercised: `0`.
 
+Accepted Phase 1E-A observation baseline:
+
+- focused normal and core-only preflight tests: `30/30` and `30/30`;
+- complete GUI-capable suite: `269/269`;
+- core-only suite: `268` pass and `1` expected GUI skip;
+- syntax and Python 3.8 grammar: `50/50`;
+- product and core-only imports: `38/38` and `24/24`;
+- privilege, dependency, source, custody, publication, capacity, inspector,
+  QEMU/KVM, resource, and operation-plan findings remain independent;
+- aggregate verdicts and factory authorization issued: `0`;
+- real privileged and product-image operation categories exercised: `0`.
+
 Completed root-free work:
 
 - one preplanned SquashFS command selected by a bounded capability probe;
@@ -124,11 +136,13 @@ Completed root-free work:
 - final-byte SHA-256 evidence;
 - crash-durable pair publication and narrow post-seal recovery;
 - one operation lock across generation, mutation, evidence, and publication.
+- observation-only factory preflight with sanitized JSON and text evidence.
 
 Remaining work:
 
-1. Add dependency, privilege, disk-space, media-layout, and workspace
-   preflight reporting for the accepted legacy-media profile.
+1. Complete Phase 1E-B bounded version queries, source-media inspection,
+   capacity requirements, exact command capture, CLI integration, and the
+   authorization handoff.
 2. Install or otherwise provide the missing `isohybrid` dependency only
    after root-free implementation and review acceptance.
 3. Execute the legacy extract and no-change rebuild in a bounded workspace.

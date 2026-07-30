@@ -284,6 +284,34 @@ def _file_identity(state):
     )
 
 
+def _file_identity_record(state):
+    return {
+        "device": state.st_dev,
+        "group_gid": state.st_gid,
+        "inode": state.st_ino,
+        "link_count": state.st_nlink,
+        "mode": state.st_mode,
+        "mtime_ns": state.st_mtime_ns,
+        "owner_uid": state.st_uid,
+        "size_bytes": state.st_size,
+        "ctime_ns": state.st_ctime_ns,
+    }
+
+
+def _file_identity_from_record(record):
+    return (
+        record["device"],
+        record["inode"],
+        record["mode"],
+        record["link_count"],
+        record["owner_uid"],
+        record["group_gid"],
+        record["size_bytes"],
+        record["mtime_ns"],
+        record["ctime_ns"],
+    )
+
+
 def _path_text(value):
     try:
         return os.fspath(value)
@@ -1004,6 +1032,7 @@ class PreflightEngine:
         require_writable,
         missing_status,
         require_single_link=False,
+        include_full_identity=False,
     ):
         syntax_issues = _path_syntax_issues(path)
         evidence = {
@@ -1075,6 +1104,8 @@ class PreflightEngine:
                 "node": _state_record(state),
             }
         )
+        if include_full_identity:
+            evidence["initial_identity"] = _file_identity_record(state)
         if issues:
             return Finding(
                 check_id,
@@ -1387,25 +1418,40 @@ class PreflightEngine:
             require_writable=False,
             missing_status=STATUS_FAIL,
             require_single_link=True,
+            include_full_identity=True,
         )
         if custody.status != STATUS_PASS:
             return custody
         evidence = dict(custody.evidence)
         evidence["path_selected"] = True
+        initial_identity = evidence["initial_identity"]
+        expected_identity = _file_identity_from_record(initial_identity)
+        expected_accepted_identity = {
+            "dev": initial_identity["device"],
+            "ino": initial_identity["inode"],
+            "mode": stat.S_IMODE(initial_identity["mode"]),
+            "path": os.path.abspath(path),
+            "size": initial_identity["size_bytes"],
+        }
         try:
             accepted_before = mounts.iso_source_identity(path)
-            digest, hash_state = self._hash_regular_file(path)
+            if accepted_before != expected_accepted_identity:
+                raise ValueError(
+                    "Accepted ISO source identity differs from initial custody"
+                )
+            digest, hash_state = self._hash_regular_file(
+                path,
+                expected_identity=expected_identity,
+            )
             accepted_after = mounts.iso_source_identity(path)
-            expected_identity = {
-                "dev": hash_state.st_dev,
-                "ino": hash_state.st_ino,
-                "mode": stat.S_IMODE(hash_state.st_mode),
-                "path": path,
-                "size": hash_state.st_size,
-            }
+            reobserved_state = os.lstat(path)
+            hashed_identity = _file_identity_record(hash_state)
+            reobserved_identity = _file_identity_record(reobserved_state)
             if (
                 accepted_before != accepted_after
-                or accepted_before != expected_identity
+                or accepted_after != expected_accepted_identity
+                or _file_identity(hash_state) != expected_identity
+                or _file_identity(reobserved_state) != expected_identity
             ):
                 raise ValueError(
                     "Accepted ISO source identity changed during observation"
@@ -1424,7 +1470,10 @@ class PreflightEngine:
         evidence.update(
             {
                 "accepted_source_identity": accepted_before,
+                "accepted_source_identity_after": accepted_after,
                 "content_observed": True,
+                "hashed_identity": hashed_identity,
+                "reobserved_identity": reobserved_identity,
                 "sha256": digest,
             }
         )
@@ -1643,36 +1692,57 @@ class PreflightEngine:
         return inspector, profile
 
     def _inspect_qemu_readiness(self):
+        selection_rule = (
+            "x86_64 selects qemu-system-x86_64; "
+            "i386, i486, i586, and i686 select qemu-system-i386"
+        )
         try:
             machine = self.machine_reader()
             if not isinstance(machine, str) or not machine:
                 raise ValueError("Machine architecture is invalid")
-            qemu_command = (
-                "qemu-system-x86_64"
-                if machine == "x86_64"
-                else "qemu-system-i386"
-            )
-            qemu_status, qemu_evidence = self._observe_executable(
-                qemu_command
-            )
-            qemu_evidence.update(
-                {
-                    "host_machine": machine,
-                    "selection_rule": (
-                        "x86_64 selects qemu-system-x86_64; "
-                        "all other values select qemu-system-i386"
-                    ),
-                }
-            )
         except Exception as error:
             qemu_status = STATUS_UNKNOWN
             qemu_evidence = {
+                "architecture_supported": None,
                 "command": None,
+                "executable_lookup_executed": False,
                 "host_machine": None,
+                "selection_rule": selection_rule,
                 "version_query_executed": False,
                 "version_status": "unobserved-until-phase-1e-b",
             }
             qemu_evidence.update(_error_evidence(error))
+        else:
+            if machine == "x86_64":
+                qemu_command = "qemu-system-x86_64"
+            elif re.fullmatch(r"i[3-6]86", machine):
+                qemu_command = "qemu-system-i386"
+            else:
+                qemu_command = None
+
+            if qemu_command is None:
+                qemu_status = STATUS_UNKNOWN
+                qemu_evidence = {
+                    "architecture_supported": False,
+                    "command": None,
+                    "executable_lookup_executed": False,
+                    "host_machine": machine,
+                    "selection_rule": selection_rule,
+                    "version_query_executed": False,
+                    "version_status": "deferred-unsupported-architecture",
+                }
+            else:
+                qemu_status, qemu_evidence = self._observe_executable(
+                    qemu_command
+                )
+                qemu_evidence.update(
+                    {
+                        "architecture_supported": True,
+                        "executable_lookup_executed": True,
+                        "host_machine": machine,
+                        "selection_rule": selection_rule,
+                    }
+                )
 
         if qemu_status == STATUS_PASS:
             qemu_binary = Finding(
@@ -1693,13 +1763,24 @@ class PreflightEngine:
                 "Provide the selected QEMU binary through a separately authorized package operation.",
             )
         else:
+            unsupported_architecture = (
+                qemu_evidence.get("architecture_supported") is False
+            )
             qemu_binary = Finding(
                 "qemu.binary",
                 "qemu",
                 STATUS_UNKNOWN,
-                "QEMU architecture or executable discovery could not complete.",
+                (
+                    "QEMU binary selection is deferred because the host architecture is unsupported."
+                    if unsupported_architecture
+                    else "QEMU architecture or executable discovery could not complete."
+                ),
                 qemu_evidence,
-                "Restore architecture and executable-path observation before Phase 1E-B.",
+                (
+                    "Use an explicitly supported x86_64 or i386-family host before Phase 1E-B QEMU planning."
+                    if unsupported_architecture
+                    else "Restore architecture and executable-path observation before Phase 1E-B."
+                ),
             )
 
         kvm_evidence = {
@@ -2424,8 +2505,15 @@ class PreflightEngine:
         )
 
     @staticmethod
-    def _hash_regular_file(path):
+    def _hash_regular_file(path, expected_identity=None):
         state = os.lstat(path)
+        if (
+            expected_identity is not None
+            and _file_identity(state) != expected_identity
+        ):
+            raise ValueError(
+                "Publication artifact differs from initial custody"
+            )
         if (
             not stat.S_ISREG(state.st_mode)
             or stat.S_ISLNK(state.st_mode)

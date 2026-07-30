@@ -365,10 +365,38 @@ class PreflightTests(unittest.TestCase):
             self.engine().inspect(self.ctx),
             "input.source-iso",
         )
+        passed_state = os.lstat(self.source_iso)
+        expected_identity = {
+            "device": passed_state.st_dev,
+            "group_gid": passed_state.st_gid,
+            "inode": passed_state.st_ino,
+            "link_count": passed_state.st_nlink,
+            "mode": passed_state.st_mode,
+            "mtime_ns": passed_state.st_mtime_ns,
+            "owner_uid": passed_state.st_uid,
+            "size_bytes": passed_state.st_size,
+            "ctime_ns": passed_state.st_ctime_ns,
+        }
         self.assertEqual(passed.status, preflight.STATUS_PASS)
         self.assertEqual(
             passed.evidence["node"]["inode"],
-            os.lstat(self.source_iso).st_ino,
+            passed_state.st_ino,
+        )
+        self.assertEqual(
+            passed.evidence["initial_identity"],
+            expected_identity,
+        )
+        self.assertEqual(
+            passed.evidence["hashed_identity"],
+            expected_identity,
+        )
+        self.assertEqual(
+            passed.evidence["reobserved_identity"],
+            expected_identity,
+        )
+        self.assertEqual(
+            passed.evidence["accepted_source_identity"],
+            passed.evidence["accepted_source_identity_after"],
         )
         self.assertEqual(
             passed.evidence["sha256"],
@@ -450,6 +478,102 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(mutation_performed, [True])
         self.assertEqual(changed.status, preflight.STATUS_FAIL)
         self.assertFalse(changed.evidence["content_observed"])
+
+        gap_state = os.lstat(self.source_iso)
+        gap_payload = bytes(
+            (value + 29) % 256
+            for value in self.source_iso.read_bytes()
+        )
+        gap_mutation_performed = []
+        real_source_identity = mounts.iso_source_identity
+
+        def mutate_after_initial_custody(path):
+            if path == str(self.source_iso) and not gap_mutation_performed:
+                with self.source_iso.open("r+b") as handle:
+                    handle.write(gap_payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.utime(
+                    self.source_iso,
+                    ns=(
+                        gap_state.st_atime_ns,
+                        gap_state.st_mtime_ns + 2_000_000,
+                    ),
+                )
+                gap_mutation_performed.append(True)
+            return real_source_identity(path)
+
+        with mock.patch.object(
+            mounts,
+            "iso_source_identity",
+            side_effect=mutate_after_initial_custody,
+        ):
+            gap_changed = self.finding(
+                self.engine().inspect(self.ctx),
+                "input.source-iso",
+            )
+
+        self.assertEqual(gap_mutation_performed, [True])
+        self.assertEqual(gap_changed.status, preflight.STATUS_FAIL)
+        self.assertEqual(
+            gap_changed.evidence["initial_identity"]["inode"],
+            gap_state.st_ino,
+        )
+        self.assertEqual(os.lstat(self.source_iso).st_ino, gap_state.st_ino)
+        self.assertFalse(gap_changed.evidence["content_observed"])
+        self.assertNotIn("sha256", gap_changed.evidence)
+
+        source_a_state = os.lstat(self.source_iso)
+        source_b = self.root / "source-b.iso"
+        source_b_payload = bytes(
+            (value + 41) % 256
+            for value in self.source_iso.read_bytes()
+        )
+        source_b.write_bytes(source_b_payload)
+        source_b_state = os.lstat(source_b)
+        source_b_digest = hashlib.sha256(source_b_payload).hexdigest()
+        replacement_performed = []
+
+        def replace_after_initial_custody(path):
+            if path == str(self.source_iso) and not replacement_performed:
+                os.replace(source_b, self.source_iso)
+                replacement_performed.append(True)
+            return real_source_identity(path)
+
+        with mock.patch.object(
+            mounts,
+            "iso_source_identity",
+            side_effect=replace_after_initial_custody,
+        ):
+            replaced = self.finding(
+                self.engine().inspect(self.ctx),
+                "input.source-iso",
+            )
+
+        self.assertEqual(replacement_performed, [True])
+        self.assertTrue(stat.S_ISREG(source_b_state.st_mode))
+        self.assertEqual(source_b_state.st_nlink, 1)
+        self.assertEqual(source_b_state.st_size, source_a_state.st_size)
+        self.assertEqual(replaced.status, preflight.STATUS_FAIL)
+        self.assertEqual(
+            replaced.evidence["node"]["inode"],
+            source_a_state.st_ino,
+        )
+        self.assertEqual(
+            replaced.evidence["initial_identity"]["inode"],
+            source_a_state.st_ino,
+        )
+        self.assertEqual(
+            os.lstat(self.source_iso).st_ino,
+            source_b_state.st_ino,
+        )
+        self.assertNotEqual(source_a_state.st_ino, source_b_state.st_ino)
+        self.assertEqual(
+            hashlib.sha256(self.source_iso.read_bytes()).hexdigest(),
+            source_b_digest,
+        )
+        self.assertFalse(replaced.evidence["content_observed"])
+        self.assertNotIn("sha256", replaced.evidence)
 
     def test_non_root_observation_is_separate_from_factory_authority(self):
         report = self.engine(
@@ -705,13 +829,61 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(absent.status, preflight.STATUS_WARNING)
         self.assertFalse(absent.evidence["exists"])
 
-        alternate = self.engine(
-            machine_reader=lambda: "i686",
+        for machine in ("i386", "i486", "i586", "i686"):
+            with self.subTest(machine=machine):
+                alternate = self.engine(
+                    machine_reader=lambda machine=machine: machine,
+                ).inspect(self.ctx)
+                alternate_qemu = self.finding(alternate, "qemu.binary")
+                self.assertEqual(
+                    alternate_qemu.evidence["command"],
+                    "qemu-system-i386",
+                )
+                self.assertTrue(
+                    alternate_qemu.evidence["architecture_supported"]
+                )
+                self.assertTrue(
+                    alternate_qemu.evidence[
+                        "executable_lookup_executed"
+                    ]
+                )
+
+        unsupported_lookups = []
+
+        def discover_for_unsupported(command):
+            unsupported_lookups.append(command)
+            candidate = self.bin_dir / command
+            return str(candidate) if candidate.exists() else None
+
+        unsupported = self.engine(
+            machine_reader=lambda: "aarch64",
+            which=discover_for_unsupported,
         ).inspect(self.ctx)
+        unsupported_qemu = self.finding(unsupported, "qemu.binary")
         self.assertEqual(
-            self.finding(alternate, "qemu.binary").evidence["command"],
-            "qemu-system-i386",
+            unsupported_qemu.status,
+            preflight.STATUS_UNKNOWN,
         )
+        self.assertEqual(
+            unsupported_qemu.evidence["host_machine"],
+            "aarch64",
+        )
+        self.assertIsNone(unsupported_qemu.evidence["command"])
+        self.assertFalse(
+            unsupported_qemu.evidence["architecture_supported"]
+        )
+        self.assertFalse(
+            unsupported_qemu.evidence["executable_lookup_executed"]
+        )
+        self.assertEqual(
+            [
+                command
+                for command in unsupported_lookups
+                if command.startswith("qemu-system-")
+            ],
+            [],
+        )
+        self.assertNotIn("qemu-system-i386", unsupported_lookups)
         contract = self.finding(
             available,
             "qemu.acceptance-contract",
@@ -779,7 +951,18 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(plan.status, preflight.STATUS_UNKNOWN)
         self.assertEqual(
             plan.evidence["ordered_stages"],
-            preflight._FACTORY_STAGES,
+            (
+                "operation-custody-acquisition",
+                "squashfs-capability-probe",
+                "squashfs-build",
+                "iso-generation",
+                "legacy-isohybrid-mutation",
+                "read-only-seal",
+                "final-byte-sha256",
+                "sidecar-preparation",
+                "crash-durable-pair-publication",
+                "publication-validation-and-acknowledgement",
+            ),
         )
         self.assertEqual(plan.evidence["commands_executed"], 0)
         self.assertFalse(plan.evidence["exact_argv_captured"])
@@ -1226,32 +1409,454 @@ class PreflightTests(unittest.TestCase):
     def test_module_contains_no_host_mutation_or_command_execution_calls(self):
         source_path = Path(preflight.__file__)
         source = source_path.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(source_path))
         forbidden_os_calls = {
             "chmod",
             "chown",
+            "execv",
+            "execve",
+            "execvp",
+            "execvpe",
+            "fchmod",
+            "fchown",
+            "fork",
+            "forkpty",
+            "lchown",
             "link",
             "makedirs",
+            "mkfifo",
+            "mknod",
             "mkdir",
+            "popen",
+            "posix_spawn",
+            "posix_spawnp",
+            "pwrite",
             "remove",
+            "rename",
+            "renames",
+            "replace",
+            "removedirs",
+            "rmdir",
+            "setegid",
+            "seteuid",
+            "setgid",
+            "setgroups",
+            "setregid",
+            "setresgid",
+            "setresuid",
+            "setreuid",
+            "setuid",
+            "spawnl",
+            "spawnle",
+            "spawnlp",
+            "spawnlpe",
+            "spawnv",
+            "spawnve",
+            "spawnvp",
+            "spawnvpe",
+            "startfile",
+            "symlink",
+            "system",
+            "truncate",
+            "unlink",
+            "utime",
+            "write",
+        }
+        pathlib_mutation_methods = {
+            "chmod",
+            "hardlink_to",
+            "lchmod",
+            "link_to",
+            "mkdir",
             "rename",
             "replace",
             "rmdir",
-            "system",
+            "symlink_to",
+            "touch",
             "unlink",
+            "write_bytes",
+            "write_text",
         }
-        observed = []
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "os"
-                and node.func.attr in forbidden_os_calls
-            ):
-                observed.append(node.func.attr)
-        self.assertEqual(observed, [])
+        shutil_mutation_helpers = {
+            "chown",
+            "copy",
+            "copy2",
+            "copyfile",
+            "copyfileobj",
+            "copymode",
+            "copystat",
+            "copytree",
+            "make_archive",
+            "move",
+            "register_archive_format",
+            "register_unpack_format",
+            "rmtree",
+            "unpack_archive",
+        }
+        read_only_os_open_flags = {
+            "O_CLOEXEC",
+            "O_DIRECTORY",
+            "O_NOCTTY",
+            "O_NOFOLLOW",
+            "O_NONBLOCK",
+            "O_PATH",
+            "O_RDONLY",
+        }
+
+        def mutation_violations(payload):
+            tree = ast.parse(payload)
+            module_aliases = {
+                "builtins": "builtins",
+                "os": "os",
+                "pathlib": "pathlib",
+                "shutil": "shutil",
+                "subprocess": "subprocess",
+            }
+            symbol_aliases = {
+                "open": ("builtins", "open"),
+            }
+            violations = []
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for imported in node.names:
+                        root_name = imported.name.split(".", 1)[0]
+                        local_name = imported.asname or root_name
+                        if root_name in {
+                            "builtins",
+                            "os",
+                            "pathlib",
+                            "shutil",
+                            "subprocess",
+                        }:
+                            module_aliases[local_name] = root_name
+                        if root_name == "subprocess":
+                            violations.append(
+                                "subprocess-import:{}".format(node.lineno)
+                            )
+                elif isinstance(node, ast.ImportFrom):
+                    root_name = (node.module or "").split(".", 1)[0]
+                    if root_name == "subprocess":
+                        violations.append(
+                            "subprocess-import:{}".format(node.lineno)
+                        )
+                    if root_name in {
+                        "builtins",
+                        "os",
+                        "pathlib",
+                        "shutil",
+                        "subprocess",
+                    }:
+                        for imported in node.names:
+                            if imported.name == "*":
+                                violations.append(
+                                    "wildcard-import:{}:{}".format(
+                                        root_name,
+                                        node.lineno,
+                                    )
+                                )
+                                continue
+                            local_name = imported.asname or imported.name
+                            symbol_aliases[local_name] = (
+                                root_name,
+                                imported.name,
+                            )
+
+            def reference(value):
+                if isinstance(value, ast.Name):
+                    if value.id in module_aliases:
+                        return (
+                            "module",
+                            module_aliases[value.id],
+                            None,
+                        )
+                    if value.id in symbol_aliases:
+                        module_name, symbol_name = symbol_aliases[value.id]
+                        return ("symbol", module_name, symbol_name)
+                    return None
+                if (
+                    isinstance(value, ast.Attribute)
+                    and isinstance(value.value, ast.Name)
+                ):
+                    base_name = value.value.id
+                    if base_name in module_aliases:
+                        return (
+                            "symbol",
+                            module_aliases[base_name],
+                            value.attr,
+                        )
+                    base_symbol = symbol_aliases.get(base_name)
+                    if base_symbol in {
+                        ("pathlib", "Path"),
+                        ("pathlib", "PosixPath"),
+                        ("pathlib", "WindowsPath"),
+                    }:
+                        return ("symbol", "pathlib", value.attr)
+                return None
+
+            assignments = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+            ]
+            for _unused in range(len(assignments) + 1):
+                changed = False
+                for assignment in assignments:
+                    value = assignment.value
+                    if value is None:
+                        continue
+                    resolved = reference(value)
+                    if resolved is None:
+                        continue
+                    targets = (
+                        assignment.targets
+                        if isinstance(assignment, ast.Assign)
+                        else (assignment.target,)
+                    )
+                    for target in targets:
+                        if not isinstance(target, ast.Name):
+                            continue
+                        if resolved[0] == "module":
+                            if (
+                                module_aliases.get(target.id)
+                                != resolved[1]
+                            ):
+                                module_aliases[target.id] = resolved[1]
+                                changed = True
+                        else:
+                            symbol = (resolved[1], resolved[2])
+                            if symbol_aliases.get(target.id) != symbol:
+                                symbol_aliases[target.id] = symbol
+                                changed = True
+                if not changed:
+                    break
+
+            flag_sources = {}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            flag_sources.setdefault(target.id, []).append(
+                                node.value
+                            )
+                elif (
+                    isinstance(node, ast.AnnAssign)
+                    and isinstance(node.target, ast.Name)
+                    and node.value is not None
+                ):
+                    flag_sources.setdefault(node.target.id, []).append(
+                        node.value
+                    )
+                elif (
+                    isinstance(node, ast.AugAssign)
+                    and isinstance(node.target, ast.Name)
+                ):
+                    flag_sources.setdefault(node.target.id, []).append(
+                        node.value
+                    )
+
+            def read_only_flag_expression(value, resolving=()):
+                if isinstance(value, ast.Constant):
+                    return type(value.value) is int and value.value == 0
+                resolved = reference(value)
+                if resolved is not None and resolved[0] == "symbol":
+                    return (
+                        resolved[1] == "os"
+                        and resolved[2] in read_only_os_open_flags
+                    )
+                if (
+                    isinstance(value, ast.BinOp)
+                    and isinstance(value.op, ast.BitOr)
+                ):
+                    return read_only_flag_expression(
+                        value.left,
+                        resolving,
+                    ) and read_only_flag_expression(
+                        value.right,
+                        resolving,
+                    )
+                if isinstance(value, ast.Name):
+                    if value.id in resolving:
+                        return False
+                    sources = flag_sources.get(value.id, ())
+                    return bool(sources) and all(
+                        read_only_flag_expression(
+                            source_value,
+                            resolving + (value.id,),
+                        )
+                        for source_value in sources
+                    )
+                return False
+
+            def open_mode(call, bound_method=False):
+                for keyword in call.keywords:
+                    if keyword.arg == "mode":
+                        return keyword.value
+                mode_index = 0 if bound_method else 1
+                if len(call.args) > mode_index:
+                    return call.args[mode_index]
+                return ast.Constant(value="r")
+
+            def mode_is_read_only(value):
+                return (
+                    isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                    and "r" in value.value
+                    and not set(value.value).intersection("wax+")
+                )
+
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                resolved = reference(node.func)
+                call_target = (
+                    (resolved[1], resolved[2])
+                    if resolved is not None
+                    and resolved[0] == "symbol"
+                    else None
+                )
+                if call_target is not None:
+                    module_name, function_name = call_target
+                    if (
+                        module_name == "os"
+                        and function_name in forbidden_os_calls
+                    ):
+                        violations.append(
+                            "os.{}:{}".format(
+                                function_name,
+                                node.lineno,
+                            )
+                        )
+                    if (
+                        module_name == "shutil"
+                        and function_name in shutil_mutation_helpers
+                    ):
+                        violations.append(
+                            "shutil.{}:{}".format(
+                                function_name,
+                                node.lineno,
+                            )
+                        )
+                    if module_name == "subprocess":
+                        violations.append(
+                            "subprocess.{}:{}".format(
+                                function_name,
+                                node.lineno,
+                            )
+                        )
+
+                method_name = (
+                    node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else None
+                )
+                if (
+                    method_name in pathlib_mutation_methods
+                    or (
+                        call_target is not None
+                        and call_target[0] == "pathlib"
+                        and call_target[1] in pathlib_mutation_methods
+                    )
+                ):
+                    violations.append(
+                        "pathlib.{}:{}".format(
+                            method_name or call_target[1],
+                            node.lineno,
+                        )
+                    )
+
+                if call_target == ("os", "open"):
+                    flag_expression = (
+                        node.args[1]
+                        if len(node.args) > 1
+                        else next(
+                            (
+                                keyword.value
+                                for keyword in node.keywords
+                                if keyword.arg == "flags"
+                            ),
+                            None,
+                        )
+                    )
+                    if (
+                        flag_expression is None
+                        or not read_only_flag_expression(flag_expression)
+                    ):
+                        violations.append(
+                            "os.open-write-flags:{}".format(node.lineno)
+                        )
+                elif (
+                    call_target == ("builtins", "open")
+                    or (
+                        call_target is not None
+                        and call_target[0] == "pathlib"
+                        and call_target[1] == "open"
+                    )
+                    or method_name == "open"
+                ):
+                    bound_method = (
+                        method_name == "open"
+                        and call_target is None
+                    )
+                    if not mode_is_read_only(
+                        open_mode(node, bound_method=bound_method)
+                    ):
+                        violations.append(
+                            "open-write-mode:{}".format(node.lineno)
+                        )
+            return sorted(set(violations))
+
+        self.assertEqual(mutation_violations(source), [])
         self.assertNotIn("subprocess", preflight.__dict__)
+
+        mutation_examples = {
+            "built-in-open-write-mode": (
+                "open('/tmp/output', 'wb')"
+            ),
+            "os-assigned-alias": (
+                "import os\n"
+                "host_os = os\n"
+                "host_os.unlink('/tmp/output')\n"
+            ),
+            "os-import-alias": (
+                "from os import replace as swap\n"
+                "swap('/tmp/a', '/tmp/b')\n"
+            ),
+            "os-open-write-flags": (
+                "import os as host_os\n"
+                "host_os.open('/tmp/output', "
+                "host_os.O_WRONLY | host_os.O_CREAT)\n"
+            ),
+            "pathlib-mutation": (
+                "from pathlib import Path as FilePath\n"
+                "FilePath('/tmp/output').write_text('payload')\n"
+            ),
+            "pathlib-open-write-mode": (
+                "from pathlib import Path\n"
+                "Path('/tmp/output').open('a')\n"
+            ),
+            "shutil-mutation-alias": (
+                "import shutil as file_ops\n"
+                "file_ops.move('/tmp/a', '/tmp/b')\n"
+            ),
+        }
+        for label, example in mutation_examples.items():
+            with self.subTest(structural_detection=label):
+                self.assertTrue(mutation_violations(example))
+
+        permitted_observations = (
+            "import os as host_os\n"
+            "import shutil as file_ops\n"
+            "flags = host_os.O_RDONLY\n"
+            "flags |= host_os.O_NOFOLLOW\n"
+            "descriptor = host_os.open('/tmp/input', flags)\n"
+            "with open('/proc/meminfo', 'r', encoding='ascii') as handle:\n"
+            "    payload = handle.read()\n"
+            "binary = file_ops.which('qemu-system-x86_64')\n"
+        )
+        self.assertEqual(
+            mutation_violations(permitted_observations),
+            [],
+        )
 
 
 if __name__ == "__main__":

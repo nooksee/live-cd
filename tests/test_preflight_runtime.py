@@ -184,6 +184,76 @@ class RuntimePreflightTests(unittest.TestCase):
         self.assertFalse(result.evidence["discovered"])
         executor.assert_not_called()
 
+    def test_nonfinite_timeout_rejected_before_process_factory(self):
+        for timeout in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(timeout=timeout):
+                process_factory = mock.Mock()
+
+                result = preflight_runtime._bounded_execute(
+                    ("/absolute/probe",),
+                    timeout_seconds=timeout,
+                    output_limit_bytes=1024,
+                    popen=process_factory,
+                )
+
+                self.assertEqual(
+                    result.error_type,
+                    "InvalidCommandContract",
+                )
+                process_factory.assert_not_called()
+
+    def test_engine_rejects_nonfinite_timeout_before_probe(self):
+        for timeout in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(timeout=timeout):
+                resolver = mock.Mock()
+                executor = mock.Mock()
+
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    preflight_runtime.RuntimeEvidenceEngine(
+                        resolver=resolver,
+                        executor=executor,
+                        timeout_seconds=timeout,
+                    )
+
+                resolver.assert_not_called()
+                executor.assert_not_called()
+
+    def test_default_resolver_uses_fixed_probe_path(self):
+        executor = mock.Mock()
+        with mock.patch.object(
+            preflight_runtime.shutil,
+            "which",
+            return_value=None,
+        ) as which:
+            result = preflight_runtime.RuntimeEvidenceEngine(
+                executor=executor,
+            ).query_version("isohybrid")
+
+        self.assertEqual(result.status, preflight_runtime.STATUS_ABSENT)
+        which.assert_called_once_with(
+            "isohybrid",
+            path=preflight_runtime._PROBE_ENVIRONMENT["PATH"],
+        )
+        executor.assert_not_called()
+
+    def test_ambient_only_tool_is_not_selected(self):
+        fake = self.add_executable("isohybrid")
+        executor = mock.Mock(
+            return_value=preflight_runtime.CommandOutcome(
+                0,
+                stdout=VERSION_OUTPUTS["isohybrid"].encode("ascii"),
+            )
+        )
+
+        with mock.patch.dict(os.environ, {"PATH": str(self.bin_dir)}):
+            result = preflight_runtime.RuntimeEvidenceEngine(
+                executor=executor,
+            ).query_version("isohybrid")
+
+        self.assertNotIn(str(fake), result.command)
+        for call in executor.call_args_list:
+            self.assertNotEqual(call.args[0][0], str(fake))
+
     def test_nonzero_timeout_malformed_and_execution_error_are_distinct(self):
         self.add_executable("mksquashfs")
         cases = (
@@ -232,6 +302,31 @@ class RuntimePreflightTests(unittest.TestCase):
                 )
                 result = engine.query_version("mksquashfs")
                 self.assertEqual(result.status, expected)
+                if expected == preflight_runtime.STATUS_NONZERO:
+                    self.assertFalse(
+                        result.evidence["version_output_matched"]
+                    )
+                    self.assertNotIn("version_line", result.evidence)
+
+    def test_nonzero_matching_version_is_retained_as_secondary_evidence(self):
+        self.add_executable("unsquashfs")
+        result = preflight_runtime.RuntimeEvidenceEngine(
+            resolver=self.resolver,
+            executor=lambda _command, **_options: (
+                preflight_runtime.CommandOutcome(
+                    1,
+                    stdout=VERSION_OUTPUTS["unsquashfs"].encode("ascii"),
+                )
+            ),
+        ).query_version("unsquashfs")
+
+        self.assertEqual(result.status, preflight_runtime.STATUS_NONZERO)
+        self.assertTrue(result.evidence["version_output_matched"])
+        self.assertEqual(
+            result.evidence["version_line"],
+            VERSION_OUTPUTS["unsquashfs"].strip(),
+        )
+        self.assertFalse(result.to_dict()["factory_authority_granted"])
 
     def test_success_with_version_on_stderr_is_preserved(self):
         self.add_executable("xorriso")
@@ -602,6 +697,31 @@ class RuntimePreflightTests(unittest.TestCase):
             result.status,
             preflight_runtime.STATUS_CUSTODY_FAILURE,
         )
+
+    def test_hard_link_added_after_phase_a_fails_before_inspection(self):
+        self.add_executable("isoinfo")
+        source_finding = self.source_finding()
+        original_bytes = self.source.read_bytes()
+        secondary = self.root / "source-secondary.iso"
+        os.link(self.source, secondary)
+        executor = mock.Mock()
+
+        result = preflight_runtime.RuntimeEvidenceEngine(
+            resolver=self.resolver,
+            executor=executor,
+        ).inspect_source_media(source_finding)
+
+        self.assertEqual(
+            result.status,
+            preflight_runtime.STATUS_CUSTODY_FAILURE,
+        )
+        executor.assert_not_called()
+        self.assertTrue(self.source.exists())
+        self.assertTrue(secondary.exists())
+        self.assertTrue(os.path.samefile(self.source, secondary))
+        self.assertEqual(self.source.stat().st_nlink, 2)
+        self.assertEqual(self.source.read_bytes(), original_bytes)
+        self.assertEqual(secondary.read_bytes(), original_bytes)
 
     def test_invalid_phase_1e_a_evidence_executes_nothing(self):
         self.add_executable("isoinfo")

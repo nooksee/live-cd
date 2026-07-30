@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -311,8 +312,7 @@ def _bounded_execute(
         not command
         or not all(isinstance(value, str) and "\x00" not in value for value in command)
         or not os.path.isabs(command[0])
-        or type(timeout_seconds) not in {int, float}
-        or timeout_seconds <= 0
+        or not _valid_timeout(timeout_seconds)
         or type(output_limit_bytes) is not int
         or output_limit_bytes <= 0
     ):
@@ -418,6 +418,18 @@ def _bounded_execute(
         output_limited=output_limited.is_set(),
         error_type=reader_error[0] if reader_error else None,
     )
+
+
+def _valid_timeout(value):
+    if type(value) is int:
+        return value > 0
+    if type(value) is float:
+        return math.isfinite(value) and value > 0
+    return False
+
+
+def _default_resolver(tool):
+    return shutil.which(tool, path=_PROBE_ENVIRONMENT["PATH"])
 
 
 def _resolve_executable(tool, resolver):
@@ -711,7 +723,11 @@ class RuntimeEvidenceEngine:
         version_output_limit=VERSION_OUTPUT_LIMIT_BYTES,
         inspection_output_limit=INSPECTION_OUTPUT_LIMIT_BYTES,
     ):
-        self.resolver = shutil.which if resolver is None else resolver
+        if not _valid_timeout(timeout_seconds):
+            raise ValueError(
+                "Runtime timeout must be a finite positive number"
+            )
+        self.resolver = _default_resolver if resolver is None else resolver
         self.executor = _bounded_execute if executor is None else executor
         self.timeout_seconds = timeout_seconds
         self.version_output_limit = version_output_limit
@@ -791,12 +807,6 @@ class RuntimeEvidenceEngine:
             )
             if not _same_node(before_state, after_state):
                 raise ValueError("Executable identity changed")
-            if status == STATUS_SUCCESS:
-                evidence["version_line"] = _version_line(
-                    spec,
-                    outcome.stdout,
-                    outcome.stderr,
-                )
         except Exception as error:
             evidence["error_type"] = type(error).__name__
             status = (
@@ -807,6 +817,22 @@ class RuntimeEvidenceEngine:
                 and outcome.error_type is None
                 else STATUS_EXECUTION_ERROR
             )
+        else:
+            if status in {STATUS_SUCCESS, STATUS_NONZERO}:
+                try:
+                    version_line = _version_line(
+                        spec,
+                        outcome.stdout,
+                        outcome.stderr,
+                    )
+                except Exception as error:
+                    evidence["version_output_matched"] = False
+                    if status == STATUS_SUCCESS:
+                        evidence["error_type"] = type(error).__name__
+                        status = STATUS_MALFORMED
+                else:
+                    evidence["version_output_matched"] = True
+                    evidence["version_line"] = version_line
         return RuntimeProbeResult(
             "version." + tool,
             status,

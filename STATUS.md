@@ -1,6 +1,6 @@
 # LiveUSB Creator status
 
-- Updated: 2026-07-28
+- Updated: 2026-07-29
 - Current version: `0.1.0.dev0`
 - Release maturity: pre-alpha recovery baseline
 
@@ -21,12 +21,12 @@ extract → no-change rebuild → QEMU boot cycle promotes the project to
 ## Verified baseline
 
 - All Python files, including package initializers, passing syntax and
-  Python 3.8 grammar validation: `48/48`.
-- Importable product modules: `37/37`.
+  Python 3.8 grammar validation: `50/50`.
+- Importable product modules: `38/38`.
 - Harmless CLI process smokes returning expected statuses: `4/4`.
-- Current tracked test modules: `10`.
-- Current unit tests passing with GUI support installed: `239/239`.
-- Core-only unit tests passing without optional PyGObject: `238`, with the one
+- Current tracked test modules: `11`.
+- Current unit tests passing with GUI support installed: `269/269`.
+- Core-only unit tests passing without optional PyGObject: `268`, with the one
   GUI-specific assertion skipped.
 - Successful remaster cycles produced by the Python implementation: `0`.
 - Successful QEMU boots of Python-generated media: `0`.
@@ -224,10 +224,35 @@ and GUI operations remain `0`. Actual power-loss behavior, a complete product
 ISO build, native Python 3.8 execution, and the privileged factory cycle
 remain untested.
 
+## Phase 1E-A observation-only preflight
+
+Phase 1E-A adds an unwired, observation-only preflight engine. It reports
+independent pass, fail, warning, unknown, and skipped findings without an
+aggregate verdict or factory authorization. Current observations cover:
+
+- literal workspace, source-ISO, lock, journal, and publication custody;
+- descriptor-safe source SHA-256 evidence and mutation detection;
+- dependency discovery with versions explicitly deferred;
+- current privilege, sudo path presence, and absent factory authority as
+  separate facts;
+- exact capacity facts with sufficiency left unresolved;
+- `isoinfo` preference with `xorriso` fallback readiness;
+- architecture-consistent QEMU discovery, KVM accessibility, and TCG
+  fallback;
+- raw CPU, load, memory, and swap evidence without readiness thresholds;
+- the accepted factory stage order with command construction and execution
+  deferred to Phase 1E-B;
+- deterministic sanitized evidence in both JSON and text output.
+
+Phase 1E-A executes version queries, ISO inspection, QEMU, mount, package,
+factory, and privileged commands `0` times. It is not wired into the CLI or
+GUI and grants factory authority `0` times.
+
 ## Immediate blockers
 
-1. Characterization coverage does not yet include media recognition or broad
-   command construction.
+1. Phase 1E-B must execute bounded version and source-media inspection,
+   establish defensible capacity requirements, capture exact planned
+   commands, and define the authorization handoff.
 2. Extract and rebuild remain hard-wired to the older single-SquashFS and
    `isolinux` media layout.
 3. The current host does not have the `isohybrid` command required for the

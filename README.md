@@ -61,7 +61,7 @@ liveusb/
   backend/                # one module per backend action
     mounts.py, chroot.py, transaction.py, extract.py, cdimage.py,
     chroot_shell.py, clean.py, deb.py, gui_install.py, hook.py,
-    pkgm.py, qemu.py, rebuild.py, xnest.py
+    pkgm.py, preflight.py, qemu.py, rebuild.py, xnest.py
   gui/                     # one module per GUI window
     main_window.py, settings_window.py, grub2_window.py,
     syslinux_window.py, tweaks_window.py, packages_window.py,

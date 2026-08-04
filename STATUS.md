@@ -288,7 +288,7 @@ questions are resolved for the B2A planning scope below.
 
 Phase 1E-B2A adds an unwired, root-free planner for one bounded next
 operation: legacy extraction, legacy final-image assembly, or BIOS QEMU boot.
-The accepted contract provides:
+Production commit `549e616`, merged through pull request `#6`, provides:
 
 - fresh Phase 1E-A recollection at grant time, with changed operation
   findings refusing authority;
@@ -305,7 +305,7 @@ The accepted contract provides:
 - commands `0` and grant identifier `0` whenever any required fact is
   missing, stale, ambiguous, unsafe, or insufficient.
 
-The candidate focused matrix passes `57/57`; the safety-sensitive regression
+The accepted focused matrix passes `57/57`; the safety-sensitive regression
 matrix passes `177/177`; complete suites pass `326/326` with GUI support and
 `325` with one expected GUI skip without PyGObject. Real root, sudo, mount,
 unmount, chroot, package, product-ISO, QEMU, Xephyr, and GUI operations remain

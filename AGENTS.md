@@ -4,6 +4,11 @@
 
 - `main` is the integration-only branch. Read-only inspection may occur on
   `main`, but project files must not be changed there.
+- Discussion, read-only investigation, and exact scope-setting may occur on
+  `main`. After Kevin Thomas and the responsible agent lock the bounded work
+  slice, that agent owns the complete repository lifecycle through branch
+  creation, implementation, validation, commit, push, pull request, merge,
+  branch cleanup, synchronization, pruning, and final verification.
 - Before the first project write in every bounded work slice, verify that
   `main` is clean and synchronized with `origin/main`, then create a fresh
   branch named `agent/<concise-kebab-case-scope>-YYYY-MM-DD`.

@@ -140,8 +140,9 @@ Accepted Phase 1E-B1 runtime-evidence baseline:
 - one synthetic ISO inspected by both providers with residue `0`;
 - CLI integration and factory authorization issued: `0`.
 
-Phase 1E-B2A root-free planning candidate:
+Accepted Phase 1E-B2A root-free planning baseline:
 
+- implementation commit and pull request: `549e616`, `#6`;
 - supported operation scopes: legacy extraction, legacy final-image
   assembly, and BIOS QEMU boot;
 - focused runtime and planning tests: `57/57`;

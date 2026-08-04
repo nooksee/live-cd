@@ -150,6 +150,7 @@ class CommandOutcome:
     timed_out: bool = False
     output_limited: bool = False
     error_type: Optional[str] = None
+    termination_confirmed: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -243,10 +244,14 @@ class RuntimeEvidence:
 
 def _node_identity(state):
     return {
+        "changed_ns": state.st_ctime_ns,
         "device": state.st_dev,
+        "group_gid": state.st_gid,
         "inode": state.st_ino,
+        "link_count": state.st_nlink,
         "mode": stat.S_IMODE(state.st_mode),
         "modified_ns": state.st_mtime_ns,
+        "owner_uid": state.st_uid,
         "size_bytes": state.st_size,
     }
 
@@ -281,11 +286,11 @@ def _signal_process(process, signal_number):
 
 def _stop_process(process):
     if process.poll() is not None:
-        return
+        return True
     _signal_process(process, signal.SIGTERM)
     try:
         process.wait(timeout=_STOP_GRACE_SECONDS)
-        return
+        return process.poll() is not None
     except subprocess.TimeoutExpired:
         pass
     _signal_process(process, signal.SIGKILL)
@@ -293,6 +298,7 @@ def _stop_process(process):
         process.wait(timeout=_STOP_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
         pass
+    return process.poll() is not None
 
 
 def _bounded_execute(
@@ -388,18 +394,21 @@ def _bounded_execute(
 
     deadline = clock() + float(timeout_seconds)
     timed_out = False
+    termination_confirmed = None
     while process.poll() is None:
         if output_limited.is_set():
-            _stop_process(process)
+            termination_confirmed = _stop_process(process)
             break
         if clock() >= deadline:
             timed_out = True
-            _stop_process(process)
+            termination_confirmed = _stop_process(process)
             break
         output_limited.wait(0.01)
 
     if process.poll() is None:
-        _stop_process(process)
+        termination_confirmed = _stop_process(process)
+    elif termination_confirmed is None:
+        termination_confirmed = True
     for reader in readers:
         reader.join(_STOP_GRACE_SECONDS * 4)
     for stream in (process.stdout, process.stderr):
@@ -409,6 +418,8 @@ def _bounded_execute(
             pass
     if any(reader.is_alive() for reader in readers):
         reader_error.append("ReaderDidNotStop")
+    if termination_confirmed is False:
+        reader_error.append("ProcessDidNotStop")
 
     return CommandOutcome(
         process.poll(),
@@ -417,6 +428,7 @@ def _bounded_execute(
         timed_out=timed_out,
         output_limited=output_limited.is_set(),
         error_type=reader_error[0] if reader_error else None,
+        termination_confirmed=termination_confirmed,
     )
 
 
@@ -459,12 +471,15 @@ def _command_evidence(outcome):
         "returncode": outcome.returncode,
         "stderr": _decode_output(outcome.stderr),
         "stdout": _decode_output(outcome.stdout),
+        "termination_confirmed": outcome.termination_confirmed,
         "timed_out": outcome.timed_out,
     }
     return evidence
 
 
 def _classify_outcome(outcome):
+    if outcome.termination_confirmed is False:
+        return STATUS_EXECUTION_ERROR
     if outcome.error_type is not None:
         return STATUS_EXECUTION_ERROR
     if outcome.timed_out:

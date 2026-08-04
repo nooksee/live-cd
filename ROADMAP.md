@@ -140,6 +140,21 @@ Accepted Phase 1E-B1 runtime-evidence baseline:
 - one synthetic ISO inspected by both providers with residue `0`;
 - CLI integration and factory authorization issued: `0`.
 
+Phase 1E-B2A root-free planning candidate:
+
+- supported operation scopes: legacy extraction, legacy final-image
+  assembly, and BIOS QEMU boot;
+- focused runtime and planning tests: `57/57`;
+- safety-sensitive regression tests: `177/177`;
+- complete GUI-capable suite: `326/326`;
+- core-only suite: `325` pass and `1` expected GUI skip;
+- syntax and Python 3.8 grammar: `54/54`;
+- product and core-only imports: `40/40` and `26/26`;
+- harmless CLI process smokes: `4/4`;
+- planned commands executed: `0`;
+- real privileged and product-image operation categories exercised: `0`;
+- CLI and GUI consumers added: `0`.
+
 Completed root-free work:
 
 - one preplanned SquashFS command selected by a bounded capability probe;
@@ -154,10 +169,9 @@ Completed root-free work:
 
 Remaining work:
 
-1. Complete Phase 1E-B2 capacity requirements, exact factory command
-   construction, minimized receipt persistence, stable descriptor
-   representation, termination observability, executable-custody policy,
-   CLI integration, and the authorization handoff.
+1. Complete Phase 1E-B2B CLI integration, full kernel-preparation and chroot
+   lifecycle binding, fresh-evidence recollection under one operation
+   boundary, one-use grant consumption, and actual execution receipts.
 2. Install or otherwise provide the missing `isohybrid` dependency only
    after root-free implementation and review acceptance.
 3. Execute the legacy extract and no-change rebuild in a bounded workspace.

@@ -1,6 +1,6 @@
 # LiveUSB Creator roadmap
 
-- Updated: 2026-07-28
+- Updated: 2026-08-04
 - Current phase: Phase 1 — recover the legacy factory
 - Current version: `0.1.0.dev0`
 
@@ -128,6 +128,18 @@ Accepted Phase 1E-A observation baseline:
 - aggregate verdicts and factory authorization issued: `0`;
 - real privileged and product-image operation categories exercised: `0`.
 
+Accepted Phase 1E-B1 runtime-evidence baseline:
+
+- implementation and review-closure commits: `7983722` and `99f5a50`;
+- focused normal and core-only tests: `29/29` and `29/29`;
+- complete GUI-capable suite: `298/298`;
+- core-only suite: `297` pass and `1` expected GUI skip;
+- syntax and Python 3.8 grammar: `52/52`;
+- product and core-only imports: `39/39` and `25/25`;
+- accepted real version outcomes: `8` success, `1` nonzero, and `1` absent;
+- one synthetic ISO inspected by both providers with residue `0`;
+- CLI integration and factory authorization issued: `0`.
+
 Completed root-free work:
 
 - one preplanned SquashFS command selected by a bounded capability probe;
@@ -137,12 +149,15 @@ Completed root-free work:
 - crash-durable pair publication and narrow post-seal recovery;
 - one operation lock across generation, mutation, evidence, and publication.
 - observation-only factory preflight with sanitized JSON and text evidence.
+- bounded version evidence and descriptor-bound source-media profile
+  inspection without factory authority.
 
 Remaining work:
 
-1. Complete Phase 1E-B bounded version queries, source-media inspection,
-   capacity requirements, exact command capture, CLI integration, and the
-   authorization handoff.
+1. Complete Phase 1E-B2 capacity requirements, exact factory command
+   construction, minimized receipt persistence, stable descriptor
+   representation, termination observability, executable-custody policy,
+   CLI integration, and the authorization handoff.
 2. Install or otherwise provide the missing `isohybrid` dependency only
    after root-free implementation and review acceptance.
 3. Execute the legacy extract and no-change rebuild in a bounded workspace.

@@ -91,11 +91,15 @@ sudo bin/live-usb -e     # extract   -r rebuild   -c chroot   -t clean
 bin/live-usb-gui
 ```
 
-The tracked test suite currently contains `11` modules. The accepted
-root-free baseline passes `269/269` tests with GUI support and `268` tests
+The tracked test suite currently contains `12` modules. The accepted
+root-free baseline passes `298/298` tests with GUI support and `297` tests
 with one expected GUI assertion skipped without PyGObject. Phase 1D legacy
 final-image generation, mutation, hashing, and crash-durable publication are
 root-free accepted. Phase 1E-A adds observation-only dependency, custody,
 capacity, media-inspector, QEMU/KVM, resource, and operation-plan findings
-without granting factory authority or executing factory commands. Real
-privileged and end-to-end acceptance remains pending.
+without granting factory authority or executing factory commands. Phase
+1E-B1 adds bounded version evidence and descriptor-bound source-media profile
+inspection without CLI integration or factory authority. Phase 1E-B2 retains
+capacity policy, exact factory commands, receipt persistence, CLI integration,
+and the authorization handoff. Real privileged and end-to-end acceptance
+remains pending.

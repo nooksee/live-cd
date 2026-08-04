@@ -1,6 +1,6 @@
 # LiveUSB Creator status
 
-- Updated: 2026-07-29
+- Updated: 2026-08-04
 - Current version: `0.1.0.dev0`
 - Release maturity: pre-alpha recovery baseline
 
@@ -21,12 +21,12 @@ extract → no-change rebuild → QEMU boot cycle promotes the project to
 ## Verified baseline
 
 - All Python files, including package initializers, passing syntax and
-  Python 3.8 grammar validation: `50/50`.
-- Importable product modules: `38/38`.
+  Python 3.8 grammar validation: `52/52`.
+- Importable product modules: `39/39`.
 - Harmless CLI process smokes returning expected statuses: `4/4`.
-- Current tracked test modules: `11`.
-- Current unit tests passing with GUI support installed: `269/269`.
-- Core-only unit tests passing without optional PyGObject: `268`, with the one
+- Current tracked test modules: `12`.
+- Current unit tests passing with GUI support installed: `298/298`.
+- Core-only unit tests passing without optional PyGObject: `297`, with the one
   GUI-specific assertion skipped.
 - Successful remaster cycles produced by the Python implementation: `0`.
 - Successful QEMU boots of Python-generated media: `0`.
@@ -248,11 +248,49 @@ Phase 1E-A executes version queries, ISO inspection, QEMU, mount, package,
 factory, and privileged commands `0` times. It is not wired into the CLI or
 GUI and grants factory authority `0` times.
 
+## Phase 1E-B1 bounded runtime evidence
+
+Production commits `7983722` and `99f5a50`, merged through pull request `#4`,
+add the provider-neutral runtime evidence layer without granting factory
+authority. The accepted implementation provides:
+
+- one explicit whitelist for ten bounded version-query tools;
+- executable discovery constrained to the same fixed path used by the child
+  process environment;
+- finite positive timeout validation, bounded aggregate output, disabled
+  standard input, no shell, and process-group termination;
+- descriptor-bound source-ISO inspection with identity and SHA-256
+  revalidation before and after inspection;
+- `isoinfo` as the preferred inspector and `xorriso` as the fallback;
+- fail-closed handling for source mutation, replacement, symlinks, and hard
+  links;
+- retained matching version evidence for a nonzero command without
+  reclassifying that command as successful;
+- deterministic sanitized evidence with factory authority fixed at `0`.
+
+Accepted real root-free evidence records version-query outcomes of `8`
+success, `1` nonzero, and `1` absent. The nonzero result is
+`unsquashfs -version`, which prints version `4.6.1` while returning status
+`1`; the absent dependency is `isohybrid`. One synthetic ISO of `366,592`
+bytes was inspected by both providers and removed with residue `0`.
+
+Phase 1E-B1 focused tests pass `29/29` in both normal and core-only postures.
+Complete suites pass `298/298` with GUI support and `297` with one expected
+GUI assertion skipped without PyGObject. Syntax and Python 3.8 grammar pass
+`52/52`; product and core-only imports pass `39/39` and `25/25`.
+
+Phase 1E-B1 remains unwired from the CLI and grants factory authority `0`
+times. Capacity policy, exact factory commands, minimized persistent receipt
+content, stable descriptor representation, termination-failure observability,
+executable replacement-race policy, and the authorization handoff remain
+Phase 1E-B2 work.
+
 ## Immediate blockers
 
-1. Phase 1E-B must execute bounded version and source-media inspection,
-   establish defensible capacity requirements, capture exact planned
-   commands, and define the authorization handoff.
+1. Phase 1E-B2 must establish defensible capacity requirements, construct
+   exact factory command arguments, define minimized persistent receipts,
+   wire the approved CLI surface, resolve termination and executable-custody
+   policy, and define the authorization handoff.
 2. Extract and rebuild remain hard-wired to the older single-SquashFS and
    `isolinux` media layout.
 3. The current host does not have the `isohybrid` command required for the

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -417,6 +418,43 @@ class RuntimePreflightTests(unittest.TestCase):
         self.assertTrue(options["start_new_session"])
         self.assertEqual(options["env"]["LC_ALL"], "C")
         self.assertEqual(options["env"]["LANGUAGE"], "C")
+
+    def test_default_executor_reports_unconfirmed_process_termination(self):
+        class ResistantProcess:
+            def __init__(self):
+                self.stdout = io.BytesIO(b"")
+                self.stderr = io.BytesIO(b"")
+                self.terminate_calls = 0
+                self.kill_calls = 0
+
+            @staticmethod
+            def poll():
+                return None
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired("resistant", timeout)
+
+            def terminate(self):
+                self.terminate_calls += 1
+
+            def kill(self):
+                self.kill_calls += 1
+
+        process = ResistantProcess()
+        ticks = iter((0.0, 1.0, 2.0, 3.0))
+        outcome = preflight_runtime._bounded_execute(
+            ("/absolute/probe",),
+            timeout_seconds=0.01,
+            output_limit_bytes=1024,
+            popen=lambda *_args, **_kwargs: process,
+            monotonic=lambda: next(ticks),
+        )
+
+        self.assertFalse(outcome.termination_confirmed)
+        self.assertEqual(outcome.error_type, "ProcessDidNotStop")
+        self.assertTrue(outcome.timed_out)
+        self.assertGreaterEqual(process.terminate_calls, 1)
+        self.assertGreaterEqual(process.kill_calls, 1)
 
     def test_default_executor_bounds_timeout_and_output(self):
         sleeper = self.bin_dir / "sleeper"

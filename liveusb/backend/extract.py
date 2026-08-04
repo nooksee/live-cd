@@ -7,6 +7,47 @@ from . import chroot, mount_session, mounts, run
 from .. import messages
 
 
+def unsquashfs_command(ctx, mount_point, executable="unsquashfs"):
+    """Return the accepted legacy filesystem-extraction argv."""
+
+    return (
+        executable,
+        "-f",
+        "-d",
+        ctx.fs_dir,
+        os.path.join(
+            mount_point,
+            "casper",
+            "filesystem.squashfs",
+        ),
+    )
+
+
+def target_architecture_command(ctx, executable="chroot"):
+    """Return the accepted target-architecture observation argv."""
+
+    return (
+        executable,
+        ctx.fs_dir,
+        "dpkg",
+        "--print-architecture",
+    )
+
+
+def media_tree_copy_command(ctx, mount_point, executable="rsync"):
+    """Return the accepted legacy ISO-tree copy argv."""
+
+    return (
+        executable,
+        "--exclude=/casper/*",
+        "--exclude=/md5sum.txt",
+        "--exclude=/README.diskdefines",
+        "-a",
+        mount_point + "/",
+        ctx.iso_dir,
+    )
+
+
 def _clean(ctx):
     """Purge only after MountSession has recovered stale resources."""
     mounts.purge_work_dirs(ctx)
@@ -60,30 +101,14 @@ def _run_extract_locked(ctx, session):
             )
 
         messages.info("Extracting FileSystem")
-        if run(
-            [
-                "unsquashfs",
-                "-f",
-                "-d",
-                ctx.fs_dir,
-                os.path.join(
-                    mount_point,
-                    "casper/filesystem.squashfs",
-                ),
-            ]
-        ).returncode != 0:
+        if run(list(unsquashfs_command(ctx, mount_point))).returncode != 0:
             messages.error(
                 "Unable to extract filesystem.squashfs!"
             )
 
         messages.info("Checking architecture")
         arch_result = subprocess.run(
-            [
-                "chroot",
-                ctx.fs_dir,
-                "dpkg",
-                "--print-architecture",
-            ],
+            list(target_architecture_command(ctx)),
             stdout=subprocess.PIPE,
             text=True,
         )
@@ -109,15 +134,7 @@ def _run_extract_locked(ctx, session):
 
         messages.info("Copying extracted files")
         rsync_result = run(
-            [
-                "rsync",
-                "--exclude=/casper/*",
-                "--exclude=/md5sum.txt",
-                "--exclude=/README.diskdefines",
-                "-a",
-                mount_point + "/",
-                ctx.iso_dir,
-            ]
+            list(media_tree_copy_command(ctx, mount_point))
         )
         if rsync_result.returncode != 0:
             messages.error("Unable to rsync files!")

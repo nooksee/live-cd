@@ -17,6 +17,102 @@ _MEDIA_SCAN_CHUNK_SIZE = 64 * 1024
 _SHA256_CHUNK_SIZE = 1024 * 1024
 
 
+def compression_probe_command(
+    compression,
+    source,
+    output,
+    executable="mksquashfs",
+):
+    """Return the bounded synthetic compressor-probe argv."""
+
+    return (
+        executable,
+        source,
+        output,
+        "-comp",
+        compression,
+        "-processors",
+        "1",
+        "-no-progress",
+    )
+
+
+def mksquashfs_command(
+    ctx,
+    output_path,
+    compression_supported,
+    executable="mksquashfs",
+    exclude_file=None,
+):
+    """Return the one accepted product-tree SquashFS argv."""
+
+    selected_exclude_file = (
+        constants.EXCLUDE_FILE
+        if exclude_file is None
+        else exclude_file
+    )
+    command = [
+        executable,
+        ctx.fs_dir,
+        output_path,
+        "-wildcards",
+        "-ef",
+        selected_exclude_file,
+    ]
+    if compression_supported:
+        command.extend(("-comp", ctx.compression))
+    return tuple(command)
+
+
+def manifest_query_command(ctx, executable="chroot"):
+    """Return the accepted package-manifest query argv."""
+
+    return (
+        executable,
+        ctx.fs_dir,
+        "dpkg-query",
+        "-W",
+        "--showformat=${Package} ${Version}\n",
+    )
+
+
+def genisoimage_command(
+    volume_label,
+    output_path,
+    executable="genisoimage",
+):
+    """Return the accepted legacy ISO-generation argv."""
+
+    return (
+        executable,
+        "-r",
+        "-V",
+        volume_label,
+        "-b",
+        "isolinux/isolinux.bin",
+        "-c",
+        "isolinux/boot.cat",
+        "-cache-inodes",
+        "-J",
+        "-l",
+        "-no-emul-boot",
+        "-boot-load-size",
+        "4",
+        "-boot-info-table",
+        "-o",
+        output_path,
+        "-input-charset",
+        "utf-8",
+        ".",
+    )
+
+
+def isohybrid_command(output_path, executable="isohybrid"):
+    """Return the accepted legacy hybrid-mutation argv."""
+
+    return executable, output_path
+
+
 def _grep_value(path, key):
     try:
         with open(path, errors="replace") as fh:
@@ -70,16 +166,13 @@ def _compression_is_supported(
             output = os.path.join(probe_root, "probe.squashfs")
             os.mkdir(source, 0o700)
             result = selected_probe(
-                [
-                    "mksquashfs",
-                    source,
-                    output,
-                    "-comp",
-                    compression,
-                    "-processors",
-                    "1",
-                    "-no-progress",
-                ],
+                list(
+                    compression_probe_command(
+                        compression,
+                        source,
+                        output,
+                    )
+                ),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -101,26 +194,23 @@ def _compression_is_supported(
 
 
 def _plan_mksquashfs_command(ctx, output_path, probe=None):
-    command = [
-        "mksquashfs",
-        ctx.fs_dir,
-        output_path,
-        "-wildcards",
-        "-ef",
-        constants.EXCLUDE_FILE,
-    ]
-    if _compression_is_supported(
+    supported = _compression_is_supported(
         ctx.compression,
         probe=probe,
         scratch_root=ctx.work_dir,
-    ):
-        command.extend(("-comp", ctx.compression))
-    else:
+    )
+    if not supported:
         messages.warning(
             "Configured SquashFS compression is unsupported; "
             "the tool default will be used"
         )
-    return command
+    return list(
+        mksquashfs_command(
+            ctx,
+            output_path,
+            supported,
+        )
+    )
 
 
 def _build_squashfs(ctx, output_path, probe=None, runner=None):
@@ -298,7 +388,9 @@ def _apply_legacy_hybrid_mutation(
         )
     iso_path = session.begin_external_primary_mutation()
     try:
-        result = selected_runner([isohybrid_path, iso_path])
+        result = selected_runner(
+            list(isohybrid_command(iso_path, isohybrid_path))
+        )
     except Exception as error:
         raise messages.LiveUSBError(
             "Unable to apply legacy hybrid ISO mutation"
@@ -397,13 +489,7 @@ def _build_locked_final_image_steps(
 
     messages.info("Creating filesystem.manifest")
     manifest_result = subprocess.run(
-        [
-            "chroot",
-            ctx.fs_dir,
-            "dpkg-query",
-            "-W",
-            "--showformat=${Package} ${Version}\n",
-        ],
+        list(manifest_query_command(ctx)),
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -476,28 +562,12 @@ def _build_locked_final_image_steps(
     candidate_path = session.begin_external_primary_write()
     try:
         genisoimage_result = run(
-            [
-                "genisoimage",
-                "-r",
-                "-V",
-                f"{dist}-{arch}-{version}",
-                "-b",
-                "isolinux/isolinux.bin",
-                "-c",
-                "isolinux/boot.cat",
-                "-cache-inodes",
-                "-J",
-                "-l",
-                "-no-emul-boot",
-                "-boot-load-size",
-                "4",
-                "-boot-info-table",
-                "-o",
-                candidate_path,
-                "-input-charset",
-                "utf-8",
-                ".",
-            ],
+            list(
+                genisoimage_command(
+                    f"{dist}-{arch}-{version}",
+                    candidate_path,
+                )
+            ),
             cwd=ctx.iso_dir,
         )
     except Exception as error:

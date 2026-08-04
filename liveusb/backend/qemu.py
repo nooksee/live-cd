@@ -8,6 +8,12 @@ from . import mounts, run
 from .. import messages
 
 
+def qemu_command(executable, iso_path, vram):
+    """Return the accepted BIOS CD-ROM QEMU argv."""
+
+    return executable, "-cdrom", iso_path, "-m", str(vram)
+
+
 def run_qemu(ctx):
     mounts.check_for_x()
 
@@ -30,7 +36,7 @@ def run_qemu(ctx):
 
     messages.extra_info("Running desktop emulator with image file", iso_path)
     qemu_bin = "qemu-system-x86_64" if platform.machine() == "x86_64" else "qemu-system-i386"
-    if run([qemu_bin, "-cdrom", iso_path, "-m", ctx.vram]).returncode != 0:
+    if run(list(qemu_command(qemu_bin, iso_path, ctx.vram))).returncode != 0:
         messages.error("An error occurred while loading image file!")
 
 

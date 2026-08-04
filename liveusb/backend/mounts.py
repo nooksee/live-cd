@@ -796,22 +796,38 @@ def authorized_mount_requests(ctx):
     return system_mount_requests(ctx) + dbus_mount_alternatives(ctx)
 
 
-def run_mount(request, runner=None):
-    selected_runner = run_ok if runner is None else runner
-    result = selected_runner(
-        ["mount"]
+def mount_command(request, executable="mount"):
+    """Return the exact mount argv for one validated request."""
+
+    return tuple(
+        [executable]
         + list(request.options)
         + [request.source, request.destination]
     )
+
+
+def run_mount(request, runner=None):
+    selected_runner = run_ok if runner is None else runner
+    result = selected_runner(list(mount_command(request)))
     if type(result) is bool:
         return result
     return getattr(result, "returncode", 1) == 0
 
 
+def unmount_command(mount_point, executable="umount", lazy=True):
+    """Return the exact unmount argv for one observed identity."""
+
+    return (
+        executable,
+        "-fl" if lazy else "-f",
+        mount_point,
+    )
+
+
 def run_unmount(identity, runner=None, lazy=True):
     selected_runner = run_ok if runner is None else runner
     result = selected_runner(
-        ["umount", "-fl" if lazy else "-f", identity.mount_point]
+        list(unmount_command(identity.mount_point, lazy=lazy))
     )
     if type(result) is bool:
         return result

@@ -21,12 +21,12 @@ extract → no-change rebuild → QEMU boot cycle promotes the project to
 ## Verified baseline
 
 - All Python files, including package initializers, passing syntax and
-  Python 3.8 grammar validation: `52/52`.
-- Importable product modules: `39/39`.
+  Python 3.8 grammar validation: `54/54`.
+- Importable product modules: `40/40`.
 - Harmless CLI process smokes returning expected statuses: `4/4`.
-- Current tracked test modules: `12`.
-- Current unit tests passing with GUI support installed: `298/298`.
-- Core-only unit tests passing without optional PyGObject: `297`, with the one
+- Current tracked test modules: `13`.
+- Current unit tests passing with GUI support installed: `326/326`.
+- Core-only unit tests passing without optional PyGObject: `325`, with the one
   GUI-specific assertion skipped.
 - Successful remaster cycles produced by the Python implementation: `0`.
 - Successful QEMU boots of Python-generated media: `0`.
@@ -279,18 +279,52 @@ Complete suites pass `298/298` with GUI support and `297` with one expected
 GUI assertion skipped without PyGObject. Syntax and Python 3.8 grammar pass
 `52/52`; product and core-only imports pass `39/39` and `25/25`.
 
-Phase 1E-B1 remains unwired from the CLI and grants factory authority `0`
-times. Capacity policy, exact factory commands, minimized persistent receipt
-content, stable descriptor representation, termination-failure observability,
-executable replacement-race policy, and the authorization handoff remain
-Phase 1E-B2 work.
+At its acceptance boundary, Phase 1E-B1 remained unwired from the CLI and
+granted factory authority `0` times. Its deferred capacity, command,
+receipt, descriptor, termination, executable-custody, and authorization
+questions are resolved for the B2A planning scope below.
+
+## Phase 1E-B2A root-free factory planning
+
+Phase 1E-B2A adds an unwired, root-free planner for one bounded next
+operation: legacy extraction, legacy final-image assembly, or BIOS QEMU boot.
+The accepted contract provides:
+
+- fresh Phase 1E-A recollection at grant time, with changed operation
+  findings refusing authority;
+- descriptor-bound source revalidation and the stable source identifier
+  `sha256:<digest>:size:<bytes>`;
+- literal executable identity, ownership, mode, link-count, and positive
+  process-termination requirements;
+- one shared command-builder source for planning and accepted operation code;
+- the explicit capacity threshold
+  `max(32GiB,source_size*12+max(4GiB,source_size*2))`, recorded as a
+  conservative policy rather than a mathematical upper bound;
+- recursively immutable plan and receipt evidence;
+- symbolic, minimized, no-clobber receipt persistence;
+- commands `0` and grant identifier `0` whenever any required fact is
+  missing, stale, ambiguous, unsafe, or insufficient.
+
+The candidate focused matrix passes `57/57`; the safety-sensitive regression
+matrix passes `177/177`; complete suites pass `326/326` with GUI support and
+`325` with one expected GUI skip without PyGObject. Real root, sudo, mount,
+unmount, chroot, package, product-ISO, QEMU, Xephyr, and GUI operations remain
+`0`.
+
+Syntax and Python 3.8 grammar pass `54/54`; product and core-only imports pass
+`40/40` and `26/26`; harmless CLI process smokes pass `4/4`.
+
+B2A has no CLI or GUI consumer and executes planned commands `0` times. It
+does not authorize the kernel-preparation and target-package lifecycle in
+`run_rebuild`. The complete contract and remaining B2B boundary are recorded
+in `docs/reviews/phase1e-b2a-factory-plan.md`.
 
 ## Immediate blockers
 
-1. Phase 1E-B2 must establish defensible capacity requirements, construct
-   exact factory command arguments, define minimized persistent receipts,
-   wire the approved CLI surface, resolve termination and executable-custody
-   policy, and define the authorization handoff.
+1. Phase 1E-B2B must wire the approved CLI surface, bind the complete
+   kernel-preparation and chroot lifecycle, recollect evidence under one
+   operation boundary, atomically consume one matching grant, and persist
+   actual execution outcomes.
 2. Extract and rebuild remain hard-wired to the older single-SquashFS and
    `isolinux` media layout.
 3. The current host does not have the `isohybrid` command required for the

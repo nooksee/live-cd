@@ -159,13 +159,17 @@ Accepted Phase 1E-B2A root-free planning baseline:
 Accepted Phase 1E-B2B root-free execution baseline:
 
 - exact CLI verbs: `plan`, `execute`, and `recover` for complete rebuild;
-- focused factory-execution tests: `25/25`;
-- complete GUI-capable suite: `358/358`;
-- core-only suite: `357` pass and `1` expected GUI skip;
+- focused factory-execution tests: `29/29`;
+- review-closure runtime, factory, and mount-recovery tests: `116/116`;
+- complete GUI-capable suite: `364/364`;
+- core-only suite: `363` pass and `1` expected GUI skip;
 - syntax and Python 3.8 grammar: `56/56`;
 - product and core-only imports: `41/41` and `27/27`;
 - harmless CLI process smokes: `5/5`;
 - one-use grant state transitions and durable outcomes accepted root-free;
+- independent acceptance review and adversarial proof closure complete;
+- fixed trusted tool discovery includes system administration directories while
+  excluding ambient operator `PATH`;
 - real privileged and product-image operation categories exercised: `0`.
 
 Completed root-free work:
@@ -185,13 +189,12 @@ Completed root-free work:
 
 Remaining work:
 
-1. Review the accepted B2B execution boundary before its first real use.
-2. Install or otherwise provide the missing `isohybrid` dependency only
-   after root-free implementation and review acceptance.
-3. Execute the legacy extract and no-change rebuild in a bounded workspace.
-4. Validate ISO structure, preserve the input byte-identically, and boot the
+1. Install or otherwise provide the missing `isohybrid` dependency through a
+   separate operational gate.
+2. Execute the legacy extract and no-change rebuild in a bounded workspace.
+3. Validate ISO structure, preserve the input byte-identically, and boot the
    output in QEMU.
-5. Reconcile the recovered 2016 customization actions after the first
+4. Reconcile the recovered 2016 customization actions after the first
    successful factory cycle. Device-writer launchers remain last.
 
 Acceptance:

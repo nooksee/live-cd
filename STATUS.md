@@ -360,12 +360,27 @@ one globally rollbackable filesystem transaction.
 
 Root-free acceptance passes:
 
-- focused factory-execution tests: `25/25`;
-- complete GUI-capable suite: `358/358`;
-- core-only suite: `357` pass and `1` expected GUI skip;
+- focused factory-execution tests: `29/29`;
+- review-closure runtime, factory, and mount-recovery tests: `116/116`;
+- complete GUI-capable suite: `364/364`;
+- core-only suite: `363` pass and `1` expected GUI skip;
 - syntax and Python 3.8 grammar: `56/56`;
 - product and core-only imports: `41/41` and `27/27`;
 - harmless CLI process smokes: `5/5`.
+
+Claude Devens independently reviewed the merged execution boundary and returned
+`Accept with closure items`: confirmed behavioral defects `0`, high findings
+`0`, medium findings `0`, low-medium test gaps `2`, low test gaps `1`, and
+informational findings `2`. The closure matrix now proves different-valid-token
+mount recovery rejection, changed-workspace revocation with commands executed
+`0`, and pre-mutation rejection of a symlinked grant bundle, hard-linked state,
+and symlinked factory lock.
+
+Jacob Codex then found that the fixed evidence-probe path omitted
+`/usr/sbin/chroot` on the acceptance host. The trusted path is now exactly
+`/usr/sbin:/usr/bin:/sbin:/bin`; ambient operator `PATH` remains excluded. A
+real bounded root-free query resolves `/usr/sbin/chroot`, returns GNU coreutils
+`9.4`, confirms process termination, and grants factory authority `0` times.
 
 Real root, sudo, mount, unmount, chroot, package, product-ISO, QEMU, Xephyr,
 and GUI operations remain `0`. The complete contract and next operational
@@ -377,8 +392,8 @@ gate are recorded in `docs/reviews/phase1e-b2b-cli-execution.md`.
    `isolinux` media layout.
 2. The current host does not have the `isohybrid` command required for the
    recovered legacy finalization path.
-3. The B2B execution boundary has completed root-free acceptance but has not
-   completed one controlled real legacy rebuild.
+3. The independently reviewed B2B execution boundary has completed root-free
+   acceptance but has not completed one controlled real legacy rebuild.
 4. Caller-level mount and host X-access safety has completed root-free
    acceptance but has not completed real privileged acceptance.
 5. Operational privilege handling still reflects the older root-process

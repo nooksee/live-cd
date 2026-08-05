@@ -50,7 +50,7 @@ class MountRecoveryTests(unittest.TestCase):
             local_present=False,
         )
 
-    def session(self):
+    def session(self, owner_token=None):
         return MountSession(
             self.ctx,
             mountinfo_reader=self.table.reader,
@@ -58,6 +58,7 @@ class MountRecoveryTests(unittest.TestCase):
             unmount_runner=self.table.unmount,
             x_query=self.x_access.query,
             x_mutator=self.x_access.mutate,
+            owner_token=owner_token,
         )
 
     def abandon(self, session):
@@ -111,6 +112,23 @@ class MountRecoveryTests(unittest.TestCase):
             pass
 
         self.assert_hard_recovery_clean()
+
+    def test_recovery_rejects_a_different_valid_owner_token(self):
+        original = self.session(owner_token="a" * 32)
+        original.__enter__()
+        journal_before = self.journal_path.read_bytes()
+        self.abandon(original)
+
+        with self.assertRaisesRegex(
+            MountRecoveryError,
+            "owner token does not match",
+        ):
+            self.session(owner_token="b" * 32).__enter__()
+
+        self.assertEqual(self.journal_path.read_bytes(), journal_before)
+        self.assertEqual(self.pending_paths(), ())
+        self.assertEqual(self.table.unmount_commands, [])
+        self.assertEqual(self.x_access.mutations, [])
 
     def test_noninitial_predecessorless_pending_is_preserved(self):
         interrupted = self.session()

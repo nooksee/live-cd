@@ -181,9 +181,10 @@ text.
 
 ## Root-free validation
 
-- focused factory-execution tests: `25/25`;
-- complete GUI-capable suite: `358/358`;
-- complete core-only suite: `357` pass and `1` expected GUI skip;
+- focused factory-execution tests: `29/29`;
+- review-closure runtime, factory, and mount-recovery tests: `116/116`;
+- complete GUI-capable suite: `364/364`;
+- complete core-only suite: `363` pass and `1` expected GUI skip;
 - syntax and Python 3.8 grammar: `56/56`;
 - product and core-only imports: `41/41` and `27/27`;
 - harmless CLI process smokes: `5/5`;
@@ -203,19 +204,41 @@ token rejection, and exception precedence.
 Real root, sudo, mount, unmount, chroot, package, product-ISO, QEMU, Xephyr,
 and GUI operations performed by this acceptance remain `0`.
 
-One final delegated read-only adversarial review was requested. It did not
-return before the integration gate and was closed while still running.
-Delegated file changes, privileged operations, and persistent impact were
-`0/0/0`. No independent-acceptance claim is made for B2B.
+## Independent review and closure
+
+Claude Devens completed a read-only review of the merged B2B range. The review
+read the changed production and test surfaces, independently ran the focused
+CLI, configuration, and factory-execution set `47/47`, and returned `Accept
+with closure items`. It found confirmed behavioral defects `0`, high findings
+`0`, medium findings `0`, low-medium test gaps `2`, low test gaps `1`, and
+informational findings `2`.
+
+The required closure proves:
+
+- a valid but different mount-session owner token cannot recover another
+  grant journal;
+- a changed canonical workspace revokes the grant with commands executed `0`;
+- symlinked grant bundles, hard-linked state records, and symlinked factory
+  locks are rejected before state mutation.
+
+Jacob Codex independently inventoried first-cycle host readiness and found one
+additional operational defect: the fixed probe path was `/bin:/usr/bin`, while
+the accepted root-owned `chroot` binary is `/usr/sbin/chroot`. The corrected
+trusted path is exactly `/usr/sbin:/usr/bin:/sbin:/bin`. It still ignores
+ambient operator `PATH`. A real bounded root-free query now resolves
+`/usr/sbin/chroot`, accepts GNU coreutils `9.4`, confirms process termination,
+and grants factory authority `0` times.
+
+The independent-review gate is closed. Real root, sudo, mount, unmount,
+chroot, package, product-ISO, QEMU, Xephyr, and GUI operations remain `0`.
 
 ## Remaining operational gate
 
 Before the first real complete rebuild:
 
-1. independently review this execution boundary;
-2. install or otherwise provide the exact accepted `isohybrid` dependency;
-3. issue a fresh plan against the preserved legacy source and workspace;
-4. inspect the refused or granted receipt before execution;
-5. execute one grant once under observation;
-6. verify the output pair, residual state, and durable outcome;
-7. boot the generated ISO in QEMU before any alpha promotion.
+1. install or otherwise provide the exact accepted `isohybrid` dependency;
+2. issue a fresh plan against the preserved legacy source and workspace;
+3. inspect the refused or granted receipt before execution;
+4. execute one grant once under observation;
+5. verify the output pair, residual state, and durable outcome;
+6. boot the generated ISO in QEMU before any alpha promotion.

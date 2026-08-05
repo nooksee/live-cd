@@ -156,6 +156,18 @@ Accepted Phase 1E-B2A root-free planning baseline:
 - real privileged and product-image operation categories exercised: `0`;
 - CLI and GUI consumers added: `0`.
 
+Accepted Phase 1E-B2B root-free execution baseline:
+
+- exact CLI verbs: `plan`, `execute`, and `recover` for complete rebuild;
+- focused factory-execution tests: `25/25`;
+- complete GUI-capable suite: `358/358`;
+- core-only suite: `357` pass and `1` expected GUI skip;
+- syntax and Python 3.8 grammar: `56/56`;
+- product and core-only imports: `41/41` and `27/27`;
+- harmless CLI process smokes: `5/5`;
+- one-use grant state transitions and durable outcomes accepted root-free;
+- real privileged and product-image operation categories exercised: `0`.
+
 Completed root-free work:
 
 - one preplanned SquashFS command selected by a bounded capability probe;
@@ -167,12 +179,13 @@ Completed root-free work:
 - observation-only factory preflight with sanitized JSON and text evidence.
 - bounded version evidence and descriptor-bound source-media profile
   inspection without factory authority.
+- complete-rebuild CLI integration, fresh evidence recollection, exact
+  execution authority, atomic one-use grant consumption, recovery-only
+  continuation, and durable outcome receipts.
 
 Remaining work:
 
-1. Complete Phase 1E-B2B CLI integration, full kernel-preparation and chroot
-   lifecycle binding, fresh-evidence recollection under one operation
-   boundary, one-use grant consumption, and actual execution receipts.
+1. Review the accepted B2B execution boundary before its first real use.
 2. Install or otherwise provide the missing `isohybrid` dependency only
    after root-free implementation and review acceptance.
 3. Execute the legacy extract and no-change rebuild in a bounded workspace.

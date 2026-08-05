@@ -62,7 +62,7 @@ liveusb/
     mounts.py, chroot.py, transaction.py, extract.py, cdimage.py,
     chroot_shell.py, clean.py, deb.py, gui_install.py, hook.py,
     pkgm.py, preflight.py, preflight_runtime.py, factory_plan.py,
-    qemu.py, rebuild.py, xnest.py
+    factory_execution.py, qemu.py, rebuild.py, xnest.py
   gui/                     # one module per GUI window
     main_window.py, settings_window.py, grub2_window.py,
     syslinux_window.py, tweaks_window.py, packages_window.py,
@@ -78,7 +78,9 @@ liveusb/
   `isohybrid` from `syslinux-utils`, `qemu-system-*`, `Xephyr`, `wget`,
   ImageMagick's `convert`
 
-The backend actions (`live-usb -e/-r/-c/...`) require root.
+Mutating backend actions require root. Factory planning may run without root.
+Factory execution and recovery require an already-root process and never
+perform implicit privilege elevation.
 
 ## Usage
 
@@ -86,12 +88,26 @@ The backend actions (`live-usb -e/-r/-c/...`) require root.
 # Backend CLI
 bin/live-usb --help
 bin/live-usb -e     # extract an ISO into the work directory
-bin/live-usb -r     # rebuild the ISO
 bin/live-usb -c     # open a chroot shell
+
+# Complete rebuild workflow
+bin/live-usb factory plan rebuild \
+  --records-dir /absolute/private/liveusb-factory-records
+sudo bin/live-usb factory execute rebuild \
+  --grant /absolute/private/liveusb-factory-records/GRANT_DIRECTORY
+
+# Use only after a consumed execution was interrupted
+sudo bin/live-usb factory recover rebuild \
+  --grant /absolute/private/liveusb-factory-records/GRANT_DIRECTORY
 
 # GUI
 bin/live-usb-gui
 ```
+
+The planning command prints the exact generated grant directory. Each grant
+is private, state-bound, and consumable once. The legacy `-r` and `--rebuild`
+flags are disabled so they cannot bypass fresh evidence, atomic grant
+consumption, exact command authority, or the durable outcome receipt.
 
 Or install it properly:
 

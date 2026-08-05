@@ -76,6 +76,17 @@ def manifest_query_command(ctx, executable="chroot"):
     )
 
 
+def target_architecture_command(ctx, executable="chroot"):
+    """Return the target architecture observation argv."""
+
+    return (
+        executable,
+        ctx.fs_dir,
+        "dpkg",
+        "--print-architecture",
+    )
+
+
 def genisoimage_command(
     volume_label,
     output_path,
@@ -187,6 +198,8 @@ def _compression_is_supported(
                 and not stat.S_ISLNK(output_state.st_mode)
                 and output_state.st_nlink == 1
             )
+    except messages.LiveUSBError:
+        raise
     except Exception as error:
         raise messages.LiveUSBError(
             "Unable to inspect mksquashfs compression capability"
@@ -374,23 +387,33 @@ def _apply_legacy_hybrid_mutation(
     session,
     runner=None,
     locator=None,
+    executor=None,
 ):
     if not _legacy_media_profile(ctx):
         raise messages.LiveUSBError(
             "ISO finalization requires the accepted legacy-media profile"
         )
-    selected_runner = run if runner is None else runner
-    selected_locator = shutil.which if locator is None else locator
-    isohybrid_path = selected_locator("isohybrid")
-    if isohybrid_path is None:
-        raise messages.LiveUSBError(
-            "Required legacy finalization tool is unavailable: isohybrid"
-        )
     iso_path = session.begin_external_primary_mutation()
     try:
-        result = selected_runner(
-            list(isohybrid_command(iso_path, isohybrid_path))
-        )
+        if executor is None:
+            selected_runner = run if runner is None else runner
+            selected_locator = shutil.which if locator is None else locator
+            isohybrid_path = selected_locator("isohybrid")
+            if isohybrid_path is None:
+                raise messages.LiveUSBError(
+                    "Required legacy finalization tool is unavailable: "
+                    "isohybrid"
+                )
+            result = selected_runner(
+                list(isohybrid_command(iso_path, isohybrid_path))
+            )
+        else:
+            executor.assert_publication_candidate(iso_path)
+            result = executor.execute_planned(
+                "legacy-isohybrid-mutation"
+            )
+    except messages.LiveUSBError:
+        raise
     except Exception as error:
         raise messages.LiveUSBError(
             "Unable to apply legacy hybrid ISO mutation"
@@ -457,20 +480,30 @@ def _build_locked_final_image_steps(
     casper_dir,
     iso_path,
     sha256_path,
+    executor=None,
+    publication_nonce=None,
 ):
     _validate_prior_pair(iso_path, sha256_path)
     publication = session.begin_external_publication(
         iso_path,
         sha256_path,
         "final-image",
+        namespace_nonce=publication_nonce,
     )
+    if executor is not None:
+        executor.assert_publication_candidate(
+            publication["primary_candidate"]
+        )
 
     messages.info("Creating squashed FileSystem")
     squashfs_path = os.path.join(
         casper_dir,
         "filesystem.squashfs",
     )
-    _build_squashfs(ctx, squashfs_path)
+    if executor is None:
+        _build_squashfs(ctx, squashfs_path)
+    else:
+        executor.build_squashfs(squashfs_path)
 
     messages.info("Checking FileSystem size")
     fs_size = os.path.getsize(squashfs_path)
@@ -488,11 +521,18 @@ def _build_locked_final_image_steps(
         fh.write(f"{fs_size}\n")
 
     messages.info("Creating filesystem.manifest")
-    manifest_result = subprocess.run(
-        list(manifest_query_command(ctx)),
-        stdout=subprocess.PIPE,
-        text=True,
-    )
+    if executor is None:
+        manifest_result = subprocess.run(
+            list(manifest_query_command(ctx)),
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+    else:
+        manifest_result = executor.execute_planned(
+            "manifest-query",
+            stdout=subprocess.PIPE,
+            text=True,
+        )
     if manifest_result.returncode != 0:
         messages.error(
             "Unable to create the filesystem.manifest!"
@@ -561,15 +601,22 @@ def _build_locked_final_image_steps(
     messages.info("Creating image file")
     candidate_path = session.begin_external_primary_write()
     try:
-        genisoimage_result = run(
-            list(
-                genisoimage_command(
-                    f"{dist}-{arch}-{version}",
-                    candidate_path,
-                )
-            ),
-            cwd=ctx.iso_dir,
-        )
+        if executor is None:
+            genisoimage_result = run(
+                list(
+                    genisoimage_command(
+                        f"{dist}-{arch}-{version}",
+                        candidate_path,
+                    )
+                ),
+                cwd=ctx.iso_dir,
+            )
+        else:
+            executor.assert_publication_candidate(candidate_path)
+            genisoimage_result = executor.execute_planned(
+                "iso-generation",
+                cwd=ctx.iso_dir,
+            )
     except Exception as error:
         raise messages.LiveUSBError(
             "Unable to execute genisoimage"
@@ -578,7 +625,11 @@ def _build_locked_final_image_steps(
         raise messages.LiveUSBError("Unable to create image file")
     session.finish_external_primary_write()
 
-    _apply_legacy_hybrid_mutation(ctx, session)
+    _apply_legacy_hybrid_mutation(
+        ctx,
+        session,
+        executor=executor,
+    )
     digest = _sha256_file(publication["primary_candidate"])
     session.record_external_digest(digest)
     session.write_external_evidence(
@@ -600,6 +651,8 @@ def _build_locked_final_image(
     casper_dir,
     iso_path,
     sha256_path,
+    executor=None,
+    publication_nonce=None,
 ):
     try:
         return _build_locked_final_image_steps(
@@ -613,6 +666,8 @@ def _build_locked_final_image(
             casper_dir,
             iso_path,
             sha256_path,
+            executor=executor,
+            publication_nonce=publication_nonce,
         )
     except messages.LiveUSBError:
         raise
@@ -622,11 +677,11 @@ def _build_locked_final_image(
         ) from error
 
 
-def _report_rebuild_success():
+def _report_rebuild_success(executor=None):
     messages.info(
         "Distribution rebuild completed. Use 'exit' to quit properly."
     )
-    if shutil.which("zenity"):
+    if executor is None and shutil.which("zenity"):
         subprocess.run(
             [
                 "zenity",
@@ -639,10 +694,44 @@ def _report_rebuild_success():
         )
 
 
-def run_rebuild(ctx):
+def _mount_session_for(ctx, executor, recovery=False):
+    if executor is None:
+        return mount_session.MountSession(ctx)
+    return executor.mount_session(ctx, recovery=recovery)
+
+
+def recover_rebuild(ctx, executor=None):
+    """Recover accepted mount or publication state without new factory work."""
+
+    chroot_recovered = chroot.recover_chroot_transaction(ctx)
+    publication_recovered = False
+    with _mount_session_for(ctx, executor, recovery=True) as session:
+        if session.has_external_publication:
+            recovered = session.current_external_publication()
+            if recovered["purpose"] != "final-image":
+                raise messages.LiveUSBError(
+                    "Recovered external publication purpose is not a final image"
+                )
+            _finish_external_publication(
+                session,
+                recovered["primary_final"],
+                recovered["evidence_final"],
+            )
+            publication_recovered = True
+    return {
+        "chroot_transaction": chroot_recovered,
+        "publication": publication_recovered,
+    }
+
+
+def run_rebuild(ctx, executor=None):
     mounts.check_fs_dir(ctx)
     mounts.check_lock(ctx)
-    with mount_session.MountSession(ctx) as recovery_session:
+    with _mount_session_for(
+        ctx,
+        executor,
+        recovery=True,
+    ) as recovery_session:
         if recovery_session.has_external_publication:
             recovered = (
                 recovery_session.current_external_publication()
@@ -657,7 +746,10 @@ def run_rebuild(ctx):
                 recovered["primary_final"],
                 recovered["evidence_final"],
             )
-            _report_rebuild_success()
+            if executor is None:
+                _report_rebuild_success()
+            else:
+                _report_rebuild_success(executor=executor)
             return
 
     chroot.update_distro_name(ctx)
@@ -716,10 +808,32 @@ def run_rebuild(ctx):
         messages.error(f"{casper_conf_path} does not exist!")
 
     messages.info("Loading distribution information")
-    arch_result = subprocess.run(["chroot", ctx.fs_dir, "dpkg", "--print-architecture"], stdout=subprocess.PIPE, text=True)
+    architecture_command = target_architecture_command(
+        ctx,
+        executable=(
+            "chroot"
+            if executor is None
+            else executor.tool_path("chroot")
+        ),
+    )
+    if executor is None:
+        arch_result = subprocess.run(
+            list(architecture_command),
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+    else:
+        arch_result = executor.execute_exact(
+            "target-architecture-observation",
+            architecture_command,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
     if arch_result.returncode != 0:
         messages.error("Unable to chroot and get the architecture of the distribution FileSystem!")
     arch = arch_result.stdout.strip()
+    if executor is not None:
+        executor.validate_architecture(arch)
 
     with open(release_notes_url_path, errors="replace") as fh:
         release_notes_url = fh.read().strip()
@@ -732,6 +846,8 @@ def run_rebuild(ctx):
         messages.error("Unable to chroot and get the distribution identification")
     if version is None:
         messages.error("Unable to get the distribution version")
+    if executor is not None:
+        executor.validate_distribution(dist, version)
 
     iso_path = os.path.join(ctx.work_dir, f"{dist}-{arch}-{version}.iso")
     sha256_path = os.path.join(
@@ -767,7 +883,7 @@ def run_rebuild(ctx):
         or not os.path.exists(initrd_source)
         or not os.path.exists(vmlinuz_source)
     )
-    with mount_session.MountSession(ctx) as session:
+    with _mount_session_for(ctx, executor) as session:
         session.mount_sys()
         if missing_kernel:
             messages.info("Purging Kernels (if any)")
@@ -779,6 +895,7 @@ def run_rebuild(ctx):
                 "linux-image*",
                 "linux-headers*",
                 "-qq",
+                executor=executor,
             )
             messages.info("Installing Kernel")
             chroot.chroot_run(
@@ -789,6 +906,7 @@ def run_rebuild(ctx):
                 "linux-image-generic",
                 "linux-headers-generic",
                 "-qq",
+                executor=executor,
             )
         else:
             messages.info("Updating kernel image")
@@ -799,6 +917,7 @@ def run_rebuild(ctx):
                 "all",
                 "-t",
                 "-u",
+                executor=executor,
             )
 
     if missing_kernel:
@@ -829,7 +948,7 @@ def run_rebuild(ctx):
                 except OSError:
                     pass
 
-    with mount_session.MountSession(ctx) as final_session:
+    with _mount_session_for(ctx, executor) as final_session:
         _build_locked_final_image(
             ctx,
             final_session,
@@ -841,8 +960,19 @@ def run_rebuild(ctx):
             casper_dir,
             iso_path,
             sha256_path,
+            executor=executor,
+            publication_nonce=(
+                None
+                if executor is None
+                else executor.publication_nonce
+            ),
         )
-    _report_rebuild_success()
+    if executor is not None:
+        executor.assert_complete()
+    if executor is None:
+        _report_rebuild_success()
+    else:
+        _report_rebuild_success(executor=executor)
 
 
 def _walk_files(root):

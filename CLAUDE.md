@@ -85,14 +85,18 @@ python3 -m py_compile liveusb/*.py liveusb/backend/*.py liveusb/gui/*.py
 
 # CLI
 bin/live-usb --help
-sudo bin/live-usb -e     # extract   -r rebuild   -c chroot   -t clean
+sudo bin/live-usb -e     # extract
+sudo bin/live-usb -c     # chroot
+bin/live-usb factory plan rebuild --records-dir ABSOLUTE_DIRECTORY
+sudo bin/live-usb factory execute rebuild --grant ABSOLUTE_GRANT_DIRECTORY
+sudo bin/live-usb factory recover rebuild --grant ABSOLUTE_GRANT_DIRECTORY
 
 # GUI
 bin/live-usb-gui
 ```
 
-The tracked test suite currently contains `13` modules. The accepted
-root-free baseline passes `326/326` tests with GUI support and `325` tests
+The tracked test suite currently contains `14` modules. The accepted
+root-free baseline passes `358/358` tests with GUI support and `357` tests
 with one expected GUI assertion skipped without PyGObject. Phase 1D legacy
 final-image generation, mutation, hashing, and crash-durable publication are
 root-free accepted. Phase 1E-A adds observation-only dependency, custody,
@@ -101,8 +105,10 @@ without granting factory authority or executing factory commands. Phase
 1E-B1 adds bounded version evidence and descriptor-bound source-media profile
 inspection without CLI integration or factory authority. Phase 1E-B2A adds
 the root-free, operation-scoped planning, capacity, custody, termination,
-receipt, and authorization contract. Phase 1E-B2B retains CLI integration,
-complete rebuild-lifecycle binding, grant consumption, and the execution
-handoff. Real privileged and end-to-end acceptance remains pending. Read
-`docs/reviews/phase1e-b2a-factory-plan.md` before changing the factory-plan
-boundary.
+receipt, and authorization contract. Phase 1E-B2B adds exact CLI integration,
+complete rebuild-lifecycle binding, one-use grant consumption, child-held
+operation custody, recovery-only continuation, and durable outcomes. The
+legacy `-r` and `--rebuild` path is disabled. Real privileged and end-to-end
+acceptance remains pending. Read
+`docs/reviews/phase1e-b2b-cli-execution.md` before changing the factory
+execution boundary.

@@ -1226,6 +1226,8 @@ def write_receipt(path, receipt, expected_owner_uid=None):
             0o600,
             dir_fd=directory_descriptor,
         )
+        if os.geteuid() == 0 and owner_uid != 0:
+            os.fchown(descriptor, owner_uid, -1)
         payload = receipt.to_bytes()
         offset = 0
         while offset < len(payload):
@@ -1286,6 +1288,7 @@ def write_receipt(path, receipt, expected_owner_uid=None):
             or stat.S_ISLNK(final_state.st_mode)
             or final_state.st_nlink != 1
             or stat.S_IMODE(final_state.st_mode) != 0o600
+            or final_state.st_uid != owner_uid
             or final_parent_state.st_dev != parent_state.st_dev
             or final_parent_state.st_ino != parent_state.st_ino
             or final_parent_state.st_uid != parent_state.st_uid

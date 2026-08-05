@@ -806,9 +806,11 @@ def mount_command(request, executable="mount"):
     )
 
 
-def run_mount(request, runner=None):
+def run_mount(request, runner=None, executable="mount"):
     selected_runner = run_ok if runner is None else runner
-    result = selected_runner(list(mount_command(request)))
+    result = selected_runner(
+        list(mount_command(request, executable=executable))
+    )
     if type(result) is bool:
         return result
     return getattr(result, "returncode", 1) == 0
@@ -824,10 +826,21 @@ def unmount_command(mount_point, executable="umount", lazy=True):
     )
 
 
-def run_unmount(identity, runner=None, lazy=True):
+def run_unmount(
+    identity,
+    runner=None,
+    lazy=True,
+    executable="umount",
+):
     selected_runner = run_ok if runner is None else runner
     result = selected_runner(
-        list(unmount_command(identity.mount_point, lazy=lazy))
+        list(
+            unmount_command(
+                identity.mount_point,
+                executable=executable,
+                lazy=lazy,
+            )
+        )
     )
     if type(result) is bool:
         return result

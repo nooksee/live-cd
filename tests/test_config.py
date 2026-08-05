@@ -143,6 +143,66 @@ class ConfigCharacterizationTests(unittest.TestCase):
                 [f'VRAM="{constants.DEFAULT_VRAM}"'],
             )
 
+    def test_strict_load_uses_defaults_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "default"
+            exclude_path = Path(directory) / "exclude"
+            config_path.write_text(
+                "WORK_DIR=/tmp/work\nMOUNT_DIR=/tmp/mount\n",
+                encoding="utf-8",
+            )
+            exclude_path.write_text("tmp/*\n", encoding="utf-8")
+            before = config_path.read_bytes()
+
+            with mock.patch.object(
+                constants,
+                "CONFIG_FILE",
+                str(config_path),
+            ), mock.patch.object(
+                constants,
+                "EXCLUDE_FILE",
+                str(exclude_path),
+            ), mock.patch.object(config.messages, "set_colors"):
+                environment = config.load_env_strict()
+
+            self.assertEqual(environment["WORK_DIR"], "/tmp/work")
+            self.assertEqual(environment["VRAM"], constants.DEFAULT_VRAM)
+            self.assertEqual(config_path.read_bytes(), before)
+
+    def test_strict_load_refuses_missing_or_duplicated_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "default"
+            exclude_path = Path(directory) / "exclude"
+            config_path.write_text(
+                "WORK_DIR=/tmp/one\nWORK_DIR=/tmp/two\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                constants,
+                "CONFIG_FILE",
+                str(config_path),
+            ), mock.patch.object(
+                constants,
+                "EXCLUDE_FILE",
+                str(exclude_path),
+            ):
+                with self.assertRaises(config.messages.LiveUSBError):
+                    config.load_env_strict()
+
+            exclude_path.write_text("tmp/*\n", encoding="utf-8")
+            with mock.patch.object(
+                constants,
+                "CONFIG_FILE",
+                str(config_path),
+            ), mock.patch.object(
+                constants,
+                "EXCLUDE_FILE",
+                str(exclude_path),
+            ):
+                with self.assertRaises(config.messages.LiveUSBError):
+                    config.load_env_strict()
+
 
 if __name__ == "__main__":
     unittest.main()

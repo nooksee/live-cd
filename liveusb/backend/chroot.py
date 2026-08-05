@@ -74,7 +74,19 @@ def messages_safe_read(path):
         return []
 
 
-def chroot_run(ctx, *args):
+def recover_chroot_transaction(ctx):
+    """Recover stale chroot substitutions without starting a command."""
+
+    return ChrootTransaction(ctx).recover_stale()
+
+
+def _execute(executor, stage, command, **options):
+    if executor is None:
+        return run(command, **options)
+    return executor.run(stage, tuple(command), **options)
+
+
+def chroot_run(ctx, *args, executor=None):
     """Port of __chroot__(): prepare, run a command inside the chroot, then clean up."""
     chroot_env = ["env", "HOME=/root", f"LC_ALL={ctx.locales}", f"LANGUAGE={ctx.locales}", f"LANG={ctx.locales}"]
 
@@ -82,70 +94,92 @@ def chroot_run(ctx, *args):
     transaction = ChrootTransaction(ctx)
     result = None
     cleanup_commands_enabled = False
+    service_targets = _service_block_targets(ctx)
+    if executor is not None:
+        executor.begin_chroot_transaction(
+            tuple(args),
+            tuple(service_targets),
+        )
 
-    with transaction:
-        try:
-            messages.info("Setting up locale")
-            run(
-                ["chroot", ctx.fs_dir]
-                + chroot_env
-                + ["locale-gen", ctx.locales]
-            )
-
-            messages.info("Blocking files")
-            transaction.block_files(
-                _service_block_targets(ctx),
-                lambda target: _create_service_stub(
-                    ctx,
-                    chroot_env,
-                    target,
-                ),
-            )
-            cleanup_commands_enabled = True
-
-            if ctx.apt_helper:
-                messages.info("Updating package database")
-                run(
-                    ["chroot", ctx.fs_dir]
-                    + chroot_env
-                    + ["apt-get", "update", "-qq"]
-                )
-                messages.info("Making sure everything is configured")
-                run(
-                    ["chroot", ctx.fs_dir]
-                    + chroot_env
-                    + ["dpkg", "--configure", "-a"]
-                )
-                run(
-                    ["chroot", ctx.fs_dir]
-                    + chroot_env
-                    + ["apt-get", "install", "-f", "-y", "-q"]
-                )
-
-            result = run(
-                ["chroot", ctx.fs_dir] + chroot_env + list(args)
-            )
-            if result.returncode != 0:
-                messages.warning("chroot has returned exit status")
-        finally:
-            messages.info("Unblocking files")
+    try:
+        with transaction:
             try:
-                transaction.unblock_services()
-            except Exception as error:
-                transaction.record_cleanup_failure(
-                    "unblock_services",
-                    ctx.fs_dir,
-                    error,
+                messages.info("Setting up locale")
+                _execute(
+                    executor,
+                    "chroot-locale",
+                    ["chroot", ctx.fs_dir]
+                    + chroot_env
+                    + ["locale-gen", ctx.locales],
                 )
 
-            messages.info("Cleaning up work directories")
-            if cleanup_commands_enabled:
-                _run_chroot_cleanup_commands(
-                    ctx,
-                    chroot_env,
-                    transaction,
+                messages.info("Blocking files")
+                transaction.block_files(
+                    service_targets,
+                    lambda target: _create_service_stub(
+                        ctx,
+                        chroot_env,
+                        target,
+                        executor=executor,
+                    ),
                 )
-            _cleanup_work_artifacts(ctx, transaction)
+                cleanup_commands_enabled = True
+
+                if ctx.apt_helper:
+                    messages.info("Updating package database")
+                    _execute(
+                        executor,
+                        "chroot-apt-helper",
+                        ["chroot", ctx.fs_dir]
+                        + chroot_env
+                        + ["apt-get", "update", "-qq"],
+                    )
+                    messages.info("Making sure everything is configured")
+                    _execute(
+                        executor,
+                        "chroot-apt-helper",
+                        ["chroot", ctx.fs_dir]
+                        + chroot_env
+                        + ["dpkg", "--configure", "-a"],
+                    )
+                    _execute(
+                        executor,
+                        "chroot-apt-helper",
+                        ["chroot", ctx.fs_dir]
+                        + chroot_env
+                        + ["apt-get", "install", "-f", "-y", "-q"],
+                    )
+
+                result = _execute(
+                    executor,
+                    "chroot-target",
+                    ["chroot", ctx.fs_dir] + chroot_env + list(args),
+                )
+                if result.returncode != 0:
+                    messages.warning("chroot has returned exit status")
+            finally:
+                messages.info("Unblocking files")
+                try:
+                    transaction.unblock_services()
+                except Exception as error:
+                    transaction.record_cleanup_failure(
+                        "unblock_services",
+                        ctx.fs_dir,
+                        error,
+                    )
+
+                messages.info("Cleaning up work directories")
+                if cleanup_commands_enabled:
+                    _run_chroot_cleanup_commands(
+                        ctx,
+                        chroot_env,
+                        transaction,
+                        executor=executor,
+                    )
+                _cleanup_work_artifacts(ctx, transaction)
+    finally:
+        if executor is not None:
+            executor.end_chroot_transaction()
 
     return result
 
@@ -166,17 +200,19 @@ def _service_block_targets(ctx):
     return targets
 
 
-def _create_service_stub(ctx, chroot_env, target):
+def _create_service_stub(ctx, chroot_env, target, executor=None):
     # Mirrors bash's ${f##*FileSystem}, which strips through the last
     # occurrence when the work directory itself contains "FileSystem".
     marker = "FileSystem"
     in_chroot_path = target[
         target.rfind(marker) + len(marker):
     ]
-    result = run(
+    result = _execute(
+        executor,
+        "chroot-service-stub",
         ["chroot", ctx.fs_dir]
         + chroot_env
-        + ["ln", "-s", "/bin/true", in_chroot_path]
+        + ["ln", "-s", "/bin/true", in_chroot_path],
     )
     if result.returncode != 0:
         raise messages.LiveUSBError(
@@ -185,7 +221,12 @@ def _create_service_stub(ctx, chroot_env, target):
     return result
 
 
-def _run_chroot_cleanup_commands(ctx, chroot_env, transaction):
+def _run_chroot_cleanup_commands(
+    ctx,
+    chroot_env,
+    transaction,
+    executor=None,
+):
     cleanup_commands = (
         ["apt-get", "autoremove", "--purge"],
         ["apt-get", "autoclean"],
@@ -194,7 +235,11 @@ def _run_chroot_cleanup_commands(ctx, chroot_env, transaction):
     for command in cleanup_commands:
         full_command = ["chroot", ctx.fs_dir] + chroot_env + command
         try:
-            run(full_command)
+            _execute(
+                executor,
+                "chroot-cleanup",
+                full_command,
+            )
         except Exception as error:
             transaction.record_cleanup_failure(
                 "chroot_cleanup_command",

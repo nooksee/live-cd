@@ -75,6 +75,8 @@ dr-xr-xr-x    1 0        0               0 Jul 30 00:00 '/casper'
 dr-xr-xr-x    1 0        0               0 Jul 30 00:00 '/.disk'
 """
 
+ISOHYBRID_REAL_VERSION_OUTPUT = "/usr/bin/isohybrid version 0.12\n"
+
 
 class RecordingExecutor:
     def __init__(self, callback):
@@ -346,6 +348,29 @@ class RuntimePreflightTests(unittest.TestCase):
             result.evidence["version_line"],
             VERSION_OUTPUTS["unsquashfs"].strip(),
         )
+        self.assertFalse(result.to_dict()["factory_authority_granted"])
+
+    def test_real_isohybrid_version_output_accepts_absolute_argv0(self):
+        self.add_executable("isohybrid")
+        executor = mock.Mock(
+            return_value=preflight_runtime.CommandOutcome(
+                0,
+                stdout=ISOHYBRID_REAL_VERSION_OUTPUT.encode("ascii"),
+                termination_confirmed=True,
+            )
+        )
+
+        result = preflight_runtime.RuntimeEvidenceEngine(
+            resolver=self.resolver,
+            executor=executor,
+        ).query_version("isohybrid")
+
+        self.assertEqual(result.status, preflight_runtime.STATUS_SUCCESS)
+        self.assertEqual(
+            result.evidence["version_line"],
+            ISOHYBRID_REAL_VERSION_OUTPUT.strip(),
+        )
+        self.assertTrue(result.evidence["version_output_matched"])
         self.assertFalse(result.to_dict()["factory_authority_granted"])
 
     def test_success_with_version_on_stderr_is_preserved(self):

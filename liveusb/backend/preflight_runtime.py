@@ -104,7 +104,7 @@ VERSION_QUERY_SPECS = (
     VersionQuerySpec(
         "isohybrid",
         ("-V",),
-        r"(?im)^isohybrid version [^\r\n]+$",
+        r"(?im)^(?:(?:/[^\s/]+)*/)?isohybrid version [^\r\n]+$",
     ),
     VersionQuerySpec(
         "chroot",

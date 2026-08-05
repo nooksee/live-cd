@@ -182,9 +182,9 @@ text.
 ## Root-free validation
 
 - focused factory-execution tests: `29/29`;
-- review-closure runtime, factory, and mount-recovery tests: `116/116`;
-- complete GUI-capable suite: `364/364`;
-- complete core-only suite: `363` pass and `1` expected GUI skip;
+- review-closure runtime, factory, and mount-recovery tests: `117/117`;
+- complete GUI-capable suite: `365/365`;
+- complete core-only suite: `364` pass and `1` expected GUI skip;
 - syntax and Python 3.8 grammar: `56/56`;
 - product and core-only imports: `41/41` and `27/27`;
 - harmless CLI process smokes: `5/5`;
@@ -229,16 +229,27 @@ ambient operator `PATH`. A real bounded root-free query now resolves
 `/usr/sbin/chroot`, accepts GNU coreutils `9.4`, confirms process termination,
 and grants factory authority `0` times.
 
-The independent-review gate is closed. Real root, sudo, mount, unmount,
-chroot, package, product-ISO, QEMU, Xephyr, and GUI operations remain `0`.
+The separate host dependency gate installed `syslinux-utils`
+`3:6.04~git20190206.bf6db5b4+dfsg1-3ubuntu3`. The real Ubuntu command emits
+`/usr/bin/isohybrid version 0.12`, including its absolute `argv[0]`, while the
+historical fixture emits `isohybrid version 0.12`. Runtime evidence now accepts
+both exact forms. The real bounded query returns success, confirms process
+termination, and grants factory authority `0`.
+
+The independent-review and dependency-evidence gates are closed. This
+correction performs real root, mount, unmount, chroot, product-ISO, QEMU,
+Xephyr, and GUI operations `0` times. The preceding separately authorized host
+gate performs package installations `1`, upgrades `0`, and removals `0`.
+Its protocol deviations are `1`, involving `2` task-owned diagnostic files
+created through the wrong mechanism and then removed; persistent impact and
+residue are `0`.
 
 ## Remaining operational gate
 
 Before the first real complete rebuild:
 
-1. install or otherwise provide the exact accepted `isohybrid` dependency;
-2. issue a fresh plan against the preserved legacy source and workspace;
-3. inspect the refused or granted receipt before execution;
-4. execute one grant once under observation;
-5. verify the output pair, residual state, and durable outcome;
-6. boot the generated ISO in QEMU before any alpha promotion.
+1. issue a fresh plan against the preserved legacy source and workspace;
+2. inspect the refused or granted receipt before execution;
+3. execute one grant once under observation;
+4. verify the output pair, residual state, and durable outcome;
+5. boot the generated ISO in QEMU before any alpha promotion.

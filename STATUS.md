@@ -25,8 +25,8 @@ extract → no-change rebuild → QEMU boot cycle promotes the project to
 - Importable product modules: `41/41`.
 - Harmless CLI process smokes returning expected statuses: `5/5`.
 - Current tracked test modules: `14`.
-- Current unit tests passing with GUI support installed: `358/358`.
-- Core-only unit tests passing without optional PyGObject: `357`, with the one
+- Current unit tests passing with GUI support installed: `365/365`.
+- Core-only unit tests passing without optional PyGObject: `364`, with the one
   GUI-specific assertion skipped.
 - Successful remaster cycles produced by the Python implementation: `0`.
 - Successful QEMU boots of Python-generated media: `0`.
@@ -361,9 +361,9 @@ one globally rollbackable filesystem transaction.
 Root-free acceptance passes:
 
 - focused factory-execution tests: `29/29`;
-- review-closure runtime, factory, and mount-recovery tests: `116/116`;
-- complete GUI-capable suite: `364/364`;
-- core-only suite: `363` pass and `1` expected GUI skip;
+- review-closure runtime, factory, and mount-recovery tests: `117/117`;
+- complete GUI-capable suite: `365/365`;
+- core-only suite: `364` pass and `1` expected GUI skip;
 - syntax and Python 3.8 grammar: `56/56`;
 - product and core-only imports: `41/41` and `27/27`;
 - harmless CLI process smokes: `5/5`.
@@ -382,6 +382,14 @@ Jacob Codex then found that the fixed evidence-probe path omitted
 real bounded root-free query resolves `/usr/sbin/chroot`, returns GNU coreutils
 `9.4`, confirms process termination, and grants factory authority `0` times.
 
+The separate host dependency gate installed `syslinux-utils`
+`3:6.04~git20190206.bf6db5b4+dfsg1-3ubuntu3`. Ubuntu `isohybrid -V` emits the
+absolute executable name as `/usr/bin/isohybrid version 0.12`, while the
+original fixture emitted only `isohybrid version 0.12`. Runtime evidence now
+accepts both exact forms without changing executable discovery or custody. A
+real bounded query passes with return code `0`, confirmed termination, and
+factory authority `0`.
+
 Real root, sudo, mount, unmount, chroot, package, product-ISO, QEMU, Xephyr,
 and GUI operations remain `0`. The complete contract and next operational
 gate are recorded in `docs/reviews/phase1e-b2b-cli-execution.md`.
@@ -390,15 +398,13 @@ gate are recorded in `docs/reviews/phase1e-b2b-cli-execution.md`.
 
 1. Extract and rebuild remain hard-wired to the older single-SquashFS and
    `isolinux` media layout.
-2. The current host does not have the `isohybrid` command required for the
-   recovered legacy finalization path.
-3. The independently reviewed B2B execution boundary has completed root-free
+2. The independently reviewed B2B execution boundary has completed root-free
    acceptance but has not completed one controlled real legacy rebuild.
-4. Caller-level mount and host X-access safety has completed root-free
+3. Caller-level mount and host X-access safety has completed root-free
    acceptance but has not completed real privileged acceptance.
-5. Operational privilege handling still reflects the older root-process
+4. Operational privilege handling still reflects the older root-process
    model.
-6. The GUI has not completed real-desktop product acceptance.
+5. The GUI has not completed real-desktop product acceptance.
 
 ## Current acceptance gate
 

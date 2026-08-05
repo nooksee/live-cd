@@ -41,6 +41,16 @@ class Context:
     @classmethod
     def load(cls):
         env = config.load_env()
+        return cls.from_env(env)
+
+    @classmethod
+    def load_strict(cls):
+        """Load factory configuration without creating or changing files."""
+
+        return cls.from_env(config.load_env_strict())
+
+    @classmethod
+    def from_env(cls, env):
         return cls(
             work_dir=env["WORK_DIR"],
             mount_dir=env["MOUNT_DIR"],

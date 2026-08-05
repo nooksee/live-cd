@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
+import types
 from unittest import mock
 
 from liveusb import cli
+from liveusb.backend import factory_plan
 
 
 class CliSafetyTests(unittest.TestCase):
@@ -114,6 +116,147 @@ class CliSafetyTests(unittest.TestCase):
             ["qemu", "extract", "clean", "extract"],
         )
         report_error.assert_not_called()
+
+    def test_legacy_rebuild_is_refused_before_configuration(self) -> None:
+        for argv in (("-r",), ("--extract", "--rebuild")):
+            with self.subTest(argv=argv), mock.patch.object(
+                cli.config,
+                "load_env",
+            ) as load_env, mock.patch.object(
+                cli,
+                "root_it",
+            ) as root_it, mock.patch.object(
+                cli.messages,
+                "extra_error_no_exit",
+            ) as report_error:
+                result = cli.main(list(argv))
+
+            self.assertEqual(result, 2)
+            load_env.assert_not_called()
+            root_it.assert_not_called()
+            report_error.assert_called()
+
+    def test_invalid_factory_grammar_has_zero_side_effects(self) -> None:
+        with mock.patch.object(
+            cli.Context,
+            "load_strict",
+        ) as load_strict, mock.patch.object(
+            cli.factory_execution,
+            "issue_complete_rebuild",
+        ) as issue, mock.patch.object(
+            cli.messages,
+            "extra_error_no_exit",
+        ) as report_error:
+            result = cli.main(
+                ["factory", "plan", "rebuild", "--wrong", "/tmp/records"]
+            )
+
+        self.assertEqual(result, 2)
+        load_strict.assert_not_called()
+        issue.assert_not_called()
+        report_error.assert_called_once()
+
+    def test_factory_plan_uses_strict_configuration_and_exact_path(self) -> None:
+        context = object()
+        receipt = factory_plan.FactoryReceipt(
+            {
+                "decision": "granted",
+                "status": "issued",
+            }
+        )
+        authorization = types.SimpleNamespace(
+            factory_authority_granted=True,
+            receipt=receipt,
+        )
+        with mock.patch.object(
+            cli.Context,
+            "load_strict",
+            return_value=context,
+        ) as load_strict, mock.patch.object(
+            cli.factory_execution,
+            "issue_complete_rebuild",
+            return_value=(authorization, "/tmp/records/grant-abc", receipt),
+        ) as issue, mock.patch("builtins.print") as output:
+            result = cli.main(
+                [
+                    "factory",
+                    "plan",
+                    "rebuild",
+                    "--records-dir",
+                    "/tmp/records",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        load_strict.assert_called_once_with()
+        issue.assert_called_once_with(context, "/tmp/records")
+        self.assertEqual(output.call_count, 2)
+
+    def test_factory_execute_requires_existing_root_process(self) -> None:
+        with mock.patch.object(
+            cli.os,
+            "geteuid",
+            return_value=1000,
+        ), mock.patch.object(
+            cli.Context,
+            "load_strict",
+        ) as load_strict, mock.patch.object(
+            cli.factory_execution,
+            "execute_issued_rebuild",
+        ) as execute:
+            result = cli.main(
+                [
+                    "factory",
+                    "execute",
+                    "rebuild",
+                    "--grant",
+                    "/tmp/records/grant-abc",
+                ]
+            )
+
+        self.assertEqual(result, 2)
+        load_strict.assert_not_called()
+        execute.assert_not_called()
+
+    def test_factory_execute_root_path_returns_persisted_status(self) -> None:
+        context = object()
+        receipt = factory_plan.FactoryReceipt(
+            {
+                "status": "succeeded",
+            }
+        )
+        authorization = types.SimpleNamespace(
+            factory_authority_granted=True,
+        )
+        with mock.patch.object(
+            cli.os,
+            "geteuid",
+            return_value=0,
+        ), mock.patch.object(
+            cli.Context,
+            "load_strict",
+            return_value=context,
+        ), mock.patch.object(
+            cli.factory_execution,
+            "execute_issued_rebuild",
+            return_value=(authorization, "/tmp/records/grant-abc", receipt),
+        ) as execute, mock.patch("builtins.print") as output:
+            result = cli.main(
+                [
+                    "factory",
+                    "execute",
+                    "rebuild",
+                    "--grant",
+                    "/tmp/records/grant-abc",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        execute.assert_called_once_with(
+            context,
+            "/tmp/records/grant-abc",
+        )
+        self.assertEqual(output.call_count, 2)
 
 
 if __name__ == "__main__":

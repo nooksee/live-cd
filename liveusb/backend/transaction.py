@@ -154,6 +154,16 @@ class ChrootTransaction:
             raise
         return False
 
+    def recover_stale(self):
+        """Recover stale transaction evidence without starting new work."""
+
+        if os.path.lexists(self.lock_path):
+            self._recover_stale_transaction()
+            self._reset_after_recovery()
+            return True
+        self._reject_orphan_metadata()
+        return False
+
     def block_files(self, targets, stub_creator=None):
         creator = self._create_stub if stub_creator is None else stub_creator
         planned = []
@@ -296,8 +306,7 @@ class ChrootTransaction:
         if os.path.lexists(self.lock_path):
             if not self.ctx.force_chroot:
                 raise messages.LiveUSBError("FileSystem is locked!")
-            self._recover_stale_transaction()
-            self._reset_after_recovery()
+            self.recover_stale()
         else:
             self._reject_orphan_metadata()
 

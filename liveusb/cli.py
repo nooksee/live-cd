@@ -14,6 +14,7 @@ import sys
 from . import __version__, config, messages
 from .backend import Context
 from .backend import cdimage, chroot_shell, clean, deb, extract, gui_install, hook, pkgm, qemu, rebuild, xnest
+from .backend import factory_execution
 
 USAGE = """
  Main options:
@@ -26,9 +27,18 @@ USAGE = """
      -d|--deb       Install Debian Package
      -k|--hook      Execute Hook
      -g|--gui       Install Desktop Environment
-     -r|--rebuild   Rebuild Image File
+     -r|--rebuild   Disabled; use the factory workflow below
      -q|--qemu      Test Build Image with Desktop Emulator
      -t|--clean     Clean All Temporary Files and Folders
+
+ Factory workflow:
+
+     factory plan rebuild --records-dir ABSOLUTE_DIRECTORY
+     factory execute rebuild --grant ABSOLUTE_GRANT_DIRECTORY
+     factory recover rebuild --grant ABSOLUTE_GRANT_DIRECTORY
+
+     The legacy -r|--rebuild path is disabled. Complete rebuilds require
+     one fresh plan, one atomically consumed grant, and one outcome receipt.
 
  Other options:
 
@@ -67,7 +77,6 @@ ACTIONS = {
     "deb": lambda ctx: deb.run_deb(ctx),
     "hook": lambda ctx: hook.run_hook(ctx),
     "gui": lambda ctx: gui_install.run_gui_install(ctx),
-    "rebuild": lambda ctx: rebuild.run_rebuild(ctx),
     "qemu": lambda ctx: qemu.run_qemu(ctx),
     "clean": lambda ctx: clean.run_clean(ctx),
 }
@@ -81,10 +90,77 @@ FLAG_TO_ACTION = {
     "-d": "deb", "--deb": "deb",
     "-k": "hook", "--hook": "hook",
     "-g": "gui", "--gui": "gui",
-    "-r": "rebuild", "--rebuild": "rebuild",
     "-q": "qemu", "--qemu": "qemu",
     "-t": "clean", "--clean": "clean",
 }
+
+_LEGACY_REBUILD_FLAGS = {"-r", "--rebuild"}
+
+
+def _factory_usage_error(message):
+    messages.extra_error_no_exit("factory command rejected", message)
+    return 2
+
+
+def _factory_main(argv):
+    forms = {
+        ("plan", "rebuild", "--records-dir"): "plan",
+        ("execute", "rebuild", "--grant"): "execute",
+        ("recover", "rebuild", "--grant"): "recover",
+    }
+    if len(argv) != 4:
+        return _factory_usage_error("exactly four factory operands are required")
+    action = forms.get(tuple(argv[:3]))
+    if action is None:
+        return _factory_usage_error("factory grammar is invalid")
+    path = os.path.abspath(os.fspath(argv[3]))
+    if path != argv[3] or os.path.normpath(path) != path:
+        return _factory_usage_error("factory path must be normalized and absolute")
+    if action in {"execute", "recover"} and os.geteuid() != 0:
+        return _factory_usage_error(
+            "factory execution and recovery require an already-root process"
+        )
+
+    try:
+        ctx = Context.load_strict()
+        if action == "plan":
+            authorization, bundle, receipt = (
+                factory_execution.issue_complete_rebuild(
+                    ctx,
+                    path,
+                )
+            )
+            print(
+                receipt.to_json(indent=2)
+                if receipt is not None
+                else authorization.receipt.to_json(indent=2)
+            )
+            if bundle is not None:
+                print("Grant directory: " + bundle)
+            return 0 if authorization.factory_authority_granted else 2
+        if action == "execute":
+            authorization, bundle, receipt = (
+                factory_execution.execute_issued_rebuild(
+                    ctx,
+                    path,
+                )
+            )
+            print(receipt.to_json(indent=2))
+            print("Grant directory: " + bundle)
+            return 0 if receipt.payload["status"] == "succeeded" else 2
+        bundle, receipt = factory_execution.recover_consumed_rebuild(
+            ctx,
+            path,
+        )
+        print(receipt.to_json(indent=2))
+        print("Grant directory: " + bundle)
+        return 2
+    except (OSError, ValueError, messages.LiveUSBError) as error:
+        messages.extra_error_no_exit(
+            "factory command failed",
+            type(error).__name__,
+        )
+        return 2
 
 
 def root_it(action):
@@ -118,6 +194,18 @@ def main(argv=None):
     if not argv:
         print(USAGE)
         return 0
+
+    if argv[0] == "factory":
+        return _factory_main(argv[1:])
+
+    if any(arg in _LEGACY_REBUILD_FLAGS for arg in argv):
+        for arg in argv:
+            if arg in _LEGACY_REBUILD_FLAGS:
+                messages.extra_error_no_exit(
+                    "legacy rebuild path is disabled",
+                    arg,
+                )
+        return 2
 
     informational_flags = {"-v", "--version", "-h", "--help"}
     valid_flags = informational_flags | set(FLAG_TO_ACTION)

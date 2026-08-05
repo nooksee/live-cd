@@ -138,6 +138,9 @@ class MountSession:
         unmount_runner=None,
         x_query=None,
         x_mutator=None,
+        owner_token=None,
+        mount_executable="mount",
+        unmount_executable="umount",
     ):
         self.ctx = ctx
         self.work_root = os.path.realpath(
@@ -176,6 +179,22 @@ class MountSession:
             if x_mutator is None
             else x_mutator
         )
+        if owner_token is not None and not (
+            isinstance(owner_token, str)
+            and len(owner_token) == 32
+            and all(
+                character in "0123456789abcdef"
+                for character in owner_token
+            )
+        ):
+            raise ValueError("Mount-session owner token is invalid")
+        if not isinstance(mount_executable, str) or not mount_executable:
+            raise ValueError("Mount executable is invalid")
+        if not isinstance(unmount_executable, str) or not unmount_executable:
+            raise ValueError("Unmount executable is invalid")
+        self._requested_owner_token = owner_token
+        self._mount_executable = mount_executable
+        self._unmount_executable = unmount_executable
         self._lock_descriptor: Optional[int] = None
         self._lock_identity = None
         self._state = None
@@ -477,6 +496,7 @@ class MountSession:
         primary_path,
         evidence_path,
         purpose,
+        namespace_nonce=None,
     ):
         """Register one crash-durable external artifact pair."""
         self._require_active_session()
@@ -504,6 +524,20 @@ class MountSession:
                     "Recovered external publication does not match "
                     "the requested targets"
                 )
+            if namespace_nonce is not None:
+                expected_name = (
+                    _EXTERNAL_NAMESPACE_PREFIX
+                    + self.token
+                    + "-"
+                    + namespace_nonce
+                    + "-primary.candidate"
+                )
+                if os.path.basename(
+                    existing["primary"]["candidate_path"]
+                ) != expected_name:
+                    raise MountRecoveryError(
+                        "Recovered publication nonce does not match"
+                    )
             if self._preflight_external(existing):
                 self._persist_journal()
             return self._external_publication_view(
@@ -522,11 +556,16 @@ class MountSession:
             raise MountRecoveryError(
                 "Existing external publication pair is incomplete"
             )
+        nonce = uuid.uuid4().hex if namespace_nonce is None else namespace_nonce
+        if not self._is_hex(nonce, 32):
+            raise MountAcquisitionError(
+                "External publication nonce is invalid"
+            )
         namespace = (
             _EXTERNAL_NAMESPACE_PREFIX
             + self.token
             + "-"
-            + uuid.uuid4().hex
+            + nonce
         )
         primary_candidate = os.path.join(
             self.work_root,
@@ -1139,6 +1178,7 @@ class MountSession:
             command_succeeded = mounts.run_mount(
                 request,
                 runner=self._mount_runner,
+                executable=self._mount_executable,
             )
         except Exception as error:
             command_error = error
@@ -1826,6 +1866,7 @@ class MountSession:
             identity,
             runner=self._unmount_runner,
             lazy=plan.get("kind") != "iso",
+            executable=self._unmount_executable,
         )
         after = self._read_mounts()
         before_keys = set(mounts.identity_map(current))
@@ -3051,7 +3092,11 @@ class MountSession:
             "mounts": [],
             "owner": {
                 "pid": os.getpid(),
-                "token": uuid.uuid4().hex,
+                "token": (
+                    uuid.uuid4().hex
+                    if self._requested_owner_token is None
+                    else self._requested_owner_token
+                ),
             },
             "phase": "active",
             "previous_sha256": None,
@@ -3123,6 +3168,14 @@ class MountSession:
     def _load_existing_journal(self):
         self._state = self._read_journal()
         self._validate_state(self._state)
+        if (
+            self._requested_owner_token is not None
+            and self._state["owner"]["token"]
+            != self._requested_owner_token
+        ):
+            raise MountRecoveryError(
+                "Recovered mount-session owner token does not match"
+            )
         self._persisted_state = copy.deepcopy(self._state)
         self._journal_active = True
 

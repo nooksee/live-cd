@@ -21,12 +21,12 @@ extract → no-change rebuild → QEMU boot cycle promotes the project to
 ## Verified baseline
 
 - All Python files, including package initializers, passing syntax and
-  Python 3.8 grammar validation: `54/54`.
-- Importable product modules: `40/40`.
-- Harmless CLI process smokes returning expected statuses: `4/4`.
-- Current tracked test modules: `13`.
-- Current unit tests passing with GUI support installed: `326/326`.
-- Core-only unit tests passing without optional PyGObject: `325`, with the one
+  Python 3.8 grammar validation: `56/56`.
+- Importable product modules: `41/41`.
+- Harmless CLI process smokes returning expected statuses: `5/5`.
+- Current tracked test modules: `14`.
+- Current unit tests passing with GUI support installed: `358/358`.
+- Core-only unit tests passing without optional PyGObject: `357`, with the one
   GUI-specific assertion skipped.
 - Successful remaster cycles produced by the Python implementation: `0`.
 - Successful QEMU boots of Python-generated media: `0`.
@@ -319,16 +319,66 @@ does not authorize the kernel-preparation and target-package lifecycle in
 `run_rebuild`. The complete contract and remaining B2B boundary are recorded
 in `docs/reviews/phase1e-b2a-factory-plan.md`.
 
+## Phase 1E-B2B root-free factory execution acceptance
+
+Phase 1E-B2B adds the complete-rebuild CLI and one-use execution boundary.
+The accepted command surface is exactly:
+
+```text
+factory plan rebuild --records-dir ABSOLUTE_DIRECTORY
+factory execute rebuild --grant ABSOLUTE_GRANT_DIRECTORY
+factory recover rebuild --grant ABSOLUTE_GRANT_DIRECTORY
+```
+
+Planning recollects fresh Phase 1E-A, B1, and B2A evidence and binds target
+distribution, architecture, kernel, mount, chroot, compression, image, and
+publication authority into one private grant. Every issued grant has a fresh
+session token and publication nonce. A stable record-directory lock spans
+fresh recollection, consumption, execution, cleanup, and outcome persistence.
+Authorized child processes inherit the lock lease so parent death cannot
+release operation custody while a child remains alive.
+
+Execution requires an already-root process. It compares a complete fresh plan
+with the stored grant, revokes stale authority before commands run, moves a
+matching grant from `issued` to `consumed` before the first command, and
+permits only the exact authorized command grammar. Dynamic unmount and service
+restoration remain governed by their accepted transaction journals. Recovery
+accepts only a consumed grant and performs cleanup or publication recovery;
+it cannot restart the rebuild or replay a factory command.
+
+Durable states are `issued`, `consumed`, `revoked`, `succeeded`, `failed`, and
+`interrupted`. Receipt publication is no-clobber and terminal state is
+reconcilable after an interrupted state write. The legacy `-r` and `--rebuild`
+flags are disabled before configuration or action side effects.
+
+The atomic guarantee applies to one-use grant consumption, state and outcome
+evidence, operation-lock custody, and the accepted final ISO/SHA-256 pair
+publication. Target `apt` and `dpkg` mutations inside the extracted filesystem
+are intentionally recorded as not fully rollbackable. The complete rebuild
+is therefore controlled and crash-recoverable, but it is not represented as
+one globally rollbackable filesystem transaction.
+
+Root-free acceptance passes:
+
+- focused factory-execution tests: `25/25`;
+- complete GUI-capable suite: `358/358`;
+- core-only suite: `357` pass and `1` expected GUI skip;
+- syntax and Python 3.8 grammar: `56/56`;
+- product and core-only imports: `41/41` and `27/27`;
+- harmless CLI process smokes: `5/5`.
+
+Real root, sudo, mount, unmount, chroot, package, product-ISO, QEMU, Xephyr,
+and GUI operations remain `0`. The complete contract and next operational
+gate are recorded in `docs/reviews/phase1e-b2b-cli-execution.md`.
+
 ## Immediate blockers
 
-1. Phase 1E-B2B must wire the approved CLI surface, bind the complete
-   kernel-preparation and chroot lifecycle, recollect evidence under one
-   operation boundary, atomically consume one matching grant, and persist
-   actual execution outcomes.
-2. Extract and rebuild remain hard-wired to the older single-SquashFS and
+1. Extract and rebuild remain hard-wired to the older single-SquashFS and
    `isolinux` media layout.
-3. The current host does not have the `isohybrid` command required for the
+2. The current host does not have the `isohybrid` command required for the
    recovered legacy finalization path.
+3. The B2B execution boundary has completed root-free acceptance but has not
+   completed one controlled real legacy rebuild.
 4. Caller-level mount and host X-access safety has completed root-free
    acceptance but has not completed real privileged acceptance.
 5. Operational privilege handling still reflects the older root-process

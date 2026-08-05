@@ -136,3 +136,58 @@ def load_env():
         env[key] = get_config_str(f"{key}=", default)
     messages.set_colors(env["MESSAGES_COLORS"] == "1")
     return env
+
+
+def load_env_strict():
+    """Read current configuration without creating or changing any file."""
+
+    required_paths = (constants.CONFIG_FILE, constants.EXCLUDE_FILE)
+    for path in required_paths:
+        try:
+            state = os.lstat(path)
+        except OSError as error:
+            raise messages.LiveUSBError(
+                "Factory configuration is unavailable: " + path
+            ) from error
+        if (
+            not os.path.isfile(path)
+            or os.path.islink(path)
+            or state.st_nlink != 1
+        ):
+            raise messages.LiveUSBError(
+                "Factory configuration custody is invalid: " + path
+            )
+
+    defaults = {
+        "WORK_DIR": constants.DEFAULT_WORK_DIR,
+        "MOUNT_DIR": constants.DEFAULT_MOUNT_DIR,
+        "MESSAGES_COLORS": "1",
+        "FORCE_CHROOT": "0",
+        "APT_HELPER": "1",
+        "RESOLUTION": "1024x768",
+        "BOOT_FILES": "0",
+        "VRAM": constants.DEFAULT_VRAM,
+        "COMPRESSION": "xz",
+        "LOCALES": "C",
+        "ISO": "",
+        "DEB": "",
+        "HOOK": "",
+        "PIC": "",
+    }
+    content = fsutil.load_file(constants.CONFIG_FILE)
+    values = {}
+    for line in content.splitlines():
+        for key in defaults:
+            marker = key + "="
+            if line.startswith(marker):
+                if key in values:
+                    raise messages.LiveUSBError(
+                        "Factory configuration key is duplicated: " + key
+                    )
+                values[key] = _unquote(line[len(marker):])
+    env = {
+        key: values.get(key, default)
+        for key, default in defaults.items()
+    }
+    messages.set_colors(env["MESSAGES_COLORS"] == "1")
+    return env

@@ -46,11 +46,17 @@ VERSION_OUTPUT_LIMIT_BYTES = 256 * 1024
 INSPECTION_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
 _STOP_GRACE_SECONDS = 0.25
+_TRUSTED_TOOL_DIRECTORIES = (
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+)
 _PROBE_ENVIRONMENT = {
     "LANG": "C",
     "LANGUAGE": "C",
     "LC_ALL": "C",
-    "PATH": os.defpath,
+    "PATH": os.pathsep.join(_TRUSTED_TOOL_DIRECTORIES),
 }
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_VERSION_TEXT = re.compile(r"^[^\x00-\x08\x0b\x0c\x0e-\x1f\x7f]*$")

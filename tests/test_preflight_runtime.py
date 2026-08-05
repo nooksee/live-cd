@@ -237,6 +237,25 @@ class RuntimePreflightTests(unittest.TestCase):
         )
         executor.assert_not_called()
 
+    def test_fixed_probe_path_includes_system_administration_tools(self):
+        self.assertEqual(
+            tuple(
+                preflight_runtime._PROBE_ENVIRONMENT["PATH"].split(
+                    os.pathsep
+                )
+            ),
+            preflight_runtime._TRUSTED_TOOL_DIRECTORIES,
+        )
+        self.assertEqual(
+            preflight_runtime._TRUSTED_TOOL_DIRECTORIES,
+            (
+                "/usr/sbin",
+                "/usr/bin",
+                "/sbin",
+                "/bin",
+            ),
+        )
+
     def test_ambient_only_tool_is_not_selected(self):
         fake = self.add_executable("isohybrid")
         executor = mock.Mock(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -299,6 +300,82 @@ class FactoryExecutionTests(unittest.TestCase):
         self.assertNotIn("stdout", grant_text)
         self.assertFalse((bundle_path / "outcome.json").exists())
 
+    def test_symlinked_bundle_is_rejected_before_state_mutation(self):
+        _authorization, bundle, _receipt = self.issue()
+        bundle_path = Path(bundle)
+        state_before = (bundle_path / "state.json").read_bytes()
+        real_bundle = bundle_path.with_name(bundle_path.name + "-real")
+        bundle_path.rename(real_bundle)
+        bundle_path.symlink_to(real_bundle.name)
+        rebuild_runner = mock.Mock()
+
+        with self.assertRaises(factory_execution.FactoryExecutionError):
+            factory_execution.execute_issued_rebuild(
+                self.ctx,
+                str(bundle_path),
+                engine=self.engine(),
+                rebuild_runner=rebuild_runner,
+            )
+
+        rebuild_runner.assert_not_called()
+        self.assertEqual(
+            (real_bundle / "state.json").read_bytes(),
+            state_before,
+        )
+        self.assertFalse((real_bundle / "outcome.json").exists())
+
+    def test_hard_linked_state_is_rejected_before_state_mutation(self):
+        _authorization, bundle, _receipt = self.issue()
+        bundle_path = Path(bundle)
+        state_path = bundle_path / "state.json"
+        state_before = state_path.read_bytes()
+        state_alias = bundle_path / "state-alias.json"
+        os.link(state_path, state_alias)
+        rebuild_runner = mock.Mock()
+
+        with self.assertRaisesRegex(ValueError, "custody"):
+            factory_execution.execute_issued_rebuild(
+                self.ctx,
+                bundle,
+                engine=self.engine(),
+                rebuild_runner=rebuild_runner,
+            )
+
+        rebuild_runner.assert_not_called()
+        self.assertEqual(state_path.read_bytes(), state_before)
+        self.assertEqual(state_alias.read_bytes(), state_before)
+        self.assertEqual(os.lstat(state_path).st_nlink, 2)
+        self.assertFalse((bundle_path / "outcome.json").exists())
+
+    def test_symlinked_record_lock_is_rejected_before_state_mutation(self):
+        _authorization, bundle, _receipt = self.issue()
+        bundle_path = Path(bundle)
+        state_before = (bundle_path / "state.json").read_bytes()
+        lock_path = self.records / "factory-execution.lock"
+        lock_path.unlink()
+        foreign_lock = self.root / "foreign-lock"
+        foreign_lock.write_bytes(b"foreign lock evidence")
+        foreign_lock.chmod(0o600)
+        lock_path.symlink_to(foreign_lock)
+        rebuild_runner = mock.Mock()
+
+        with self.assertRaises(OSError):
+            factory_execution.execute_issued_rebuild(
+                self.ctx,
+                bundle,
+                engine=self.engine(),
+                rebuild_runner=rebuild_runner,
+            )
+
+        rebuild_runner.assert_not_called()
+        self.assertTrue(lock_path.is_symlink())
+        self.assertEqual(foreign_lock.read_bytes(), b"foreign lock evidence")
+        self.assertEqual(
+            (bundle_path / "state.json").read_bytes(),
+            state_before,
+        )
+        self.assertFalse((bundle_path / "outcome.json").exists())
+
     def test_fresh_evidence_drift_revokes_without_execution(self):
         _authorization, bundle, _receipt = self.issue()
         self.source.write_bytes(b"changed source bytes")
@@ -319,6 +396,40 @@ class FactoryExecutionTests(unittest.TestCase):
             receipt.payload["status"],
             factory_execution.STATE_REVOKED,
         )
+        rebuild_runner.assert_not_called()
+        state = json.loads(
+            (Path(bundle) / "state.json").read_text(encoding="ascii")
+        )
+        self.assertEqual(state["phase"], factory_execution.STATE_REVOKED)
+
+    def test_changed_workspace_revokes_without_execution(self):
+        _authorization, bundle, _receipt = self.issue()
+        relocated_work = self.root / "relocated-work"
+        shutil.copytree(self.work, relocated_work)
+        relocated_ctx = Context(
+            work_dir=str(relocated_work),
+            mount_dir=str(self.mount_root),
+            runtime_dir=str(self.runtime_parent / "liveusb"),
+            iso=str(self.source),
+        )
+        rebuild_runner = mock.Mock()
+
+        fresh, returned_bundle, receipt = (
+            factory_execution.execute_issued_rebuild(
+                relocated_ctx,
+                bundle,
+                engine=self.engine(),
+                rebuild_runner=rebuild_runner,
+            )
+        )
+
+        self.assertEqual(returned_bundle, bundle)
+        self.assertTrue(fresh.factory_authority_granted)
+        self.assertEqual(
+            receipt.payload["status"],
+            factory_execution.STATE_REVOKED,
+        )
+        self.assertEqual(receipt.payload["commands_executed"], 0)
         rebuild_runner.assert_not_called()
         state = json.loads(
             (Path(bundle) / "state.json").read_text(encoding="ascii")
